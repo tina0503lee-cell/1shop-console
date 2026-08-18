@@ -1,5 +1,5 @@
 # C BDD 現行規格
-<!-- 更新：2026-08-13 -->
+<!-- 更新：2026-08-18 -->
 
 > **適用場景**：要新增/修改功能前先看驗收條件；要寫測試、跑回歸、判斷「改完算不算過」時讀本檔。
 > **不處理**：為什麼平台會這樣（→ A 平台事實）；UI 元件位置與流程圖（→ B UI 骨架）；歷史版本沿革（→ Notion 版本日誌）
@@ -177,8 +177,24 @@ Scenario Outline: 訂單自動分類
     | 折抵金額 > 0          | EXC      | 待折抵          | 確認中  | false |
     | 收件地址含「海外」    | OVERSEAS | 海外單          | 確認中  | false |
     | 付款狀態為「等待付款」| UNPAID   | 提醒付款        | 確認中  | true  |
-    | 顧客有多筆訂單        | DUP      | (依 KEEP/CANCEL)| 不移動  | (依)  |
+    | 顧客有多筆訂單        | DUP      | (依 dupRole)    | (依)    | (依)  |
     | 其他                  | NORMAL   | (空)            | 不移動  | false |
+
+Scenario Outline: 重複單的角色分流(dupRole)
+  Given 一組同顧客的重複訂單,付款狀態組合為 <組合>
+  When 掃描完成
+  Then 各筆的 dupRole 應為 <角色>
+  And 預設備註應為 <備註>,預設發信應為 <發信>
+
+  Examples:
+    | 組合                      | 角色                    | 備註                | 發信       |
+    | 刷卡成功 + 刷卡失敗       | 成功筆 KEEP / 失敗筆 CANCEL | (空)/ 重複訂單 此筆取消 | true/false |
+    | 貨到付款 + 刷卡失敗       | 貨到付款筆 KEEP / 失敗筆 CANCEL | (空)/ 重複訂單 此筆取消 | true/false |
+    | 兩筆皆貨到付款            | 全部 PENDING            | 重複訂單 待客服確認  | false      |
+    | 兩筆皆純未付款            | 全部 PENDING            | 重複訂單 待客服確認  | false      |
+    | 未付款 + 刷卡失敗         | 未付款筆 UNPAID_DUP / 失敗筆 PENDING | 提醒付款，重複訂單幫關心 / 重複訂單 待客服確認 | true/false |
+    註:整組都沒有「明顯成功筆」時不得硬選一筆當 KEEP —— 否則客人會收到
+      「已幫您取消,只保留下訂成功的那筆」,但根本沒有成功的那筆
 
 Scenario: 訂單分類優先序
   Given 一筆訂單同時符合「預購 + 未付款」
@@ -241,11 +257,20 @@ Scenario: 修改移分頁目的地
   Then 該訂單應該被移到「其他」分頁,而非「暫存」
 
 Scenario: 修改發信勾選
-  Given 某筆 NORMAL 訂單 needEmail 預設為 false
-  When 使用者勾選該列 .v11-row-email
-  Then 該訂單的 needEmail 應變為 true
+  Given 某筆 UNPAID 訂單 needEmail 預設為 true
+  When 使用者取消勾選該列 .v11-row-email
+  Then 該訂單的 needEmail 應變為 false
   When 執行階段 A
-  Then 該訂單應該被發信
+  Then 該訂單不應該被發信
+
+Scenario: 勾選了發信但該類型沒有公版 — 擋下並出聲
+  Given 某筆 NORMAL 訂單(或 DUP 取消筆)被人工勾選發信
+  When 執行階段 A
+  Then 不應該打開發信 modal
+  And Toast 應顯示「🚫 <訂單 ID> 不發信(<原因>)」
+  And Console 應留下 warn「[發信] <訂單 ID> 擋下:<原因>」
+  And 該訂單「不算失敗」,仍會正常進入階段 B 移分頁
+    註:pickEmailTemplate 回傳 null 即「這筆不該寄」的權威判定,呼叫端不得繞過
 
 Scenario: 人工分類調整 — EXC 改為 NORMAL(V11.39 新增)
   Given 某筆 EXC 訂單,備註「待折抵」,rowMoveTab「確認中」
@@ -274,21 +299,71 @@ Feature: 階段 A — 寫商家備註 + 發信
 Scenario: 寫商家備註
   Given 某筆訂單 rowNote = "預購品處理中"
   When 執行階段 A 對該訂單
-  Then 應該打開 1shop 該訂單的「商家備註」彈窗
-  And 在 textarea#shop_note 寫入 "預購品處理中"
-  And 點擊原生「更新」按鈕儲存
-  And 等待儲存成功
+  Then 應該先執行 forceCloseAllModals 清掉上一筆的殘留 modal
+  And 打開 1shop 該訂單的「商家備註」彈窗
+  And 在 textarea#shop_note 寫入 "MM/DD 預購品處理中"(執行時才加日期前綴)
+  And 點擊儲存按鈕
+  And processNoteForOrder 應回傳 true
+
+Scenario: 寫商家備註失敗
+  Given 某筆訂單所有備註入口候選都打不開 shop_note
+  Then processNoteForOrder 應回傳 false
+  And Toast 應顯示「⚠️ <訂單 ID> 寫商家備註失敗 → 本筆不移分頁、不分流」
+  And 該訂單應進入失敗清單,不進階段 B/C
 
 Scenario: 發信給顧客
-  Given 某筆訂單 needEmail = true
-  And 公版郵件主旨 = "您的訂單已重複,我們將為您取消其中一筆"
-  And 公版郵件內文 = "{訂單內文模板}"
+  Given 某筆訂單 needEmail = true 且 pickEmailTemplate 有回傳公版
   When 執行階段 A 對該訂單
   Then 應該打開 1shop 該訂單的「客戶通訊」面板
-  And 在 input#subject 寫入主旨
-  And 在 textarea#body 寫入內文
-  And 點擊「確認」送出
-  And 應該偵測到「動態活體追蹤器」確認發信成功
+  And 在 input#subject(name="subject")寫入主旨
+  And 在 textarea#body_code(name="body_code")寫入內文
+    註:平台欄位名是 body_code 不是 body,見 A 平台事實 P10
+  And {{order_number}} 應替換為訂單編號、{{product_name}} 應替換為商品名稱
+  And 點擊 modal 內的「確認」送出
+  And sendEmailForOrder 應回傳 true
+
+Scenario Outline: 發信公版的取用來源
+  Given 某筆訂單 needEmail = true,類型為 <類型>、dupRole 為 <角色>
+  When 執行階段 A
+  Then 應該使用 <公版> 發信
+
+  Examples:
+    | 類型   | 角色       | 公版                              |
+    | DUP    | KEEP       | 重複單公版(popup 存檔值優先)      |
+    | DUP    | CANCEL     | (不發信,擋下)                    |
+    | DUP    | PENDING    | (不發信,擋下)                    |
+    | DUP    | UNPAID_DUP | 未付款催繳公版                     |
+    | UNPAID | -          | 未付款催繳公版                     |
+    | NORMAL | -          | (不發信,擋下)                    |
+
+Scenario: 卡片上的公版編輯框只在被改過時才覆寫
+  Given DUP 卡片的公版編輯框內容與存檔公版完全一致(使用者沒動過)
+  When 執行階段 A
+  Then 應該由每筆訂單自己的 dupRole 決定公版
+  When 使用者把該編輯框內容改成別的文字
+  And 重新執行階段 A
+  Then 該卡片內所有「會發信」的訂單都應改用編輯框的內容
+
+Scenario: 公版 popup 存檔後真的生效
+  Given 使用者點「📧 異常單預設公版」,改寫【未付款催繳】主旨後按儲存
+  Then 值應寫入 v11_unpaid_subj
+  And 看板應立即重繪,UNPAID 卡片的公版編輯框應顯示新主旨
+  When 執行階段 A 對一筆 UNPAID 訂單
+  Then 寄出的信主旨應為新主旨
+
+Scenario: 發信失敗要出聲,而且擋住後續階段
+  Given 某筆訂單發信時找不到主旨或內文輸入框
+  Then Console 應印出該 modal 內所有輸入欄位的 id / name(診斷用)
+  And Toast 應顯示「❌ <訂單 ID> 發信失敗:找不到輸入框」
+  And 應執行 forceCloseAllModals 清掉殘留 modal
+  And sendEmailForOrder 應回傳 false
+  And 該訂單應進入失敗清單
+  When 階段 A 全部跑完
+  Then 應彈出 alert 列出所有失敗訂單與原因
+  And 失敗訂單不應進入階段 B 移分頁
+  And 失敗訂單不應進入階段 C 物流分流
+  And 其餘成功訂單應照常完成
+  And 完成 Toast 應顯示「成功 N 筆,失敗 M 筆」而非只報總數
 
 Scenario: rowNote 空白時跳過備註
   Given 某筆 NORMAL 訂單 rowNote 為空白

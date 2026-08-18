@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         🔥 1shop 出貨中控台 (V11.54 修分批第2批按鈕消失)
 // @namespace    http://tampermonkey.net/
-// @version      11.54.0
+// @version      11.55.0
 // @description  V11.54 修 63 筆跨頁測試發現的「分批第 2 批拋印失敗」:「更多批次功能」按鈕是 1shop「有勾選訂單才由 Vue 渲染」的,V11.52 每批印後取消勾選(按鈕消失),第 2 批重新勾選後 Vue 需時間重繪按鈕,原本一次性 findBtnByText 常抓不到 → 第 2 批拋單/印單靜默跳過(第 1 批成功、第 2 批失敗)。修法:tryThrowAction / doPrintAction 找「更多批次功能」改為 waitFor 等待重試(4 秒),給 Vue 渲染時間。基於 V11.53 商品組合下拉透明統計
 // @author       Tina + Claude
 // @match        *://admin.1shop.tw/*
@@ -19,12 +19,16 @@
   // ============================================================
   //  ⓪ 全域常數 / 設定
   // ============================================================
-  const VERSION = 'V11.54';
+  const VERSION = 'V11.55';
   const LS = {
     PRE_KWS: 'v11_preorder_kws',          // 預購關鍵字
     SCAN_PAGES: 'v11_scan_pages',         // 深潛頁數
     BATCH_SUBJ: 'v11_batch_subj',         // 異常單公版主旨
     BATCH_BODY: 'v11_batch_body',         // 異常單公版內文
+    // ★ V11.55:公版 popup 拆成「重複單 / 未付款」兩組。舊版只有一組、而且存了沒人讀
+    //   (發信路徑只看常數與卡片編輯框)→ 使用者在 popup 改完公版,寄出去的信卻沒變
+    UNPAID_SUBJ: 'v11_unpaid_subj',       // 未付款催繳公版主旨
+    UNPAID_BODY: 'v11_unpaid_body',       // 未付款催繳公版內文
     RESUME_FLAG: 'v11_resume_logistics',  // 跨頁續航:刷新後要繼續跑物流
     RESUME_PAYLOAD: 'v11_resume_payload', // 跨頁續航攜帶資料
     LAST_KANBAN: 'v11_last_kanban_open',  // 上次是否開著看板
@@ -36,7 +40,10 @@
     // 信封 SVG path 完整指紋(對話定版,完全等價判定,不再用開頭匹配)
     ENVELOPE_PATH_FULL: 'M61.4 64C27.5 64 0 91.5 0 125.4 0 126.3 0 127.1 .1 128L0 128 0 384c0 35.3 28.7 64 64 64l384 0c35.3 0 64-28.7 64-64l0-256-.1 0c0-.9 .1-1.7 .1-2.6 0-33.9-27.5-61.4-61.4-61.4L61.4 64zM464 192.3L464 384c0 8.8-7.2 16-16 16L64 400c-8.8 0-16-7.2-16-16l0-191.7 154.8 117.4c31.4 23.9 74.9 23.9 106.4 0L464 192.3zM48 125.4C48 118 54 112 61.4 112l389.2 0c7.4 0 13.4 6 13.4 13.4 0 4.2-2 8.2-5.3 10.7L280.2 271.5c-14.3 10.8-34.1 10.8-48.4 0L53.3 136.1c-3.3-2.5-5.3-6.5-5.3-10.7z',
     EMAIL_SUBJECT: '#subject, input[name="subject"]',
-    EMAIL_BODY: 'textarea#body, textarea[name="body"]',
+    // ★ V11.55 根因修正:實測平台內文框是 body_code,不是 body(→ A 平台事實 P10)
+    //   舊指紋只找 body → 主旨填得進去、內文永遠 waitFor 逾時 → 整筆發信失敗並關掉 modal
+    //   現場症狀就是「信框跳出來又自己關掉,信沒寄出」。新舊指紋並存,平台改回去也不會壞
+    EMAIL_BODY: 'textarea#body_code, textarea[name="body_code"], textarea#body, textarea[name="body"]',
     EMAIL_SUBMIT_SCOPE: '.modal-dialog button, .modal button', // 「確認」按鈕限定在 modal 內找
     EMAIL_SUBMIT_TEXT: '確認',
     NATIVE_UPDATE_TEXT: '更新',
@@ -122,6 +129,8 @@
   // ── 商家備註公版(對話定版)──
   //   會自動在前面贅加 "MM/DD " 日期前綴
   const NOTE_TEMPLATES = {
+    // ★ V11.55【待 Tina 定版】情境 A/B(整組都沒有成功筆)的備註文案,先給暫定值
+    DUP_PENDING: '重複訂單 待客服確認',
     DUP_KEEP:    '',                      // 重複單較新筆(保留):備註空白
     DUP_CANCEL:  '重複訂單 此筆取消',     // 重複單較舊筆(取消)
     UNPAID:      '提醒付款',              // 單筆未付款
@@ -838,10 +847,15 @@
           </div>
           <div class="v11-email-popup" id="v11-email-popup">
             <h3>⚙️ 異常單預設公版設定</h3>
-            <label>主旨</label>
+            <!-- ★ V11.55:拆成「重複單 / 未付款」兩組,存檔後發信路徑會真的讀取(舊版存了沒人讀)-->
+            <label>【重複單】主旨</label>
             <input id="v11-bsubj" type="text">
-            <label>內文</label>
-            <textarea id="v11-bbody" rows="6"></textarea>
+            <label>【重複單】內文</label>
+            <textarea id="v11-bbody" rows="4"></textarea>
+            <label>【未付款催繳】主旨</label>
+            <input id="v11-usubj" type="text">
+            <label>【未付款催繳】內文(可用 {{order_number}} / {{product_name}})</label>
+            <textarea id="v11-ubody" rows="7"></textarea>
             <div style="display:flex; justify-content:flex-end; gap:8px;">
               <button class="v11-btn" style="background:#95a5a6;" id="v11-bcancel">取消</button>
               <button class="v11-btn" style="background:#27ae60;" id="v11-bsave">儲存</button>
@@ -966,16 +980,25 @@
 
     $('#v11-btn-edit-email').onclick = () => {
       const p = $('#v11-email-popup');
-      $('#v11-bsubj').value = Storage.get(LS.BATCH_SUBJ, DEFAULT_EMAILS.DUP_CANCEL.subject);
-      $('#v11-bbody').value = Storage.get(LS.BATCH_BODY, DEFAULT_EMAILS.DUP_CANCEL.body);
+      // ★ V11.55:兩組公版一起載入
+      const dupTpl = getStoredTemplate('DUP');
+      const unpaidTpl = getStoredTemplate('UNPAID');
+      $('#v11-bsubj').value = dupTpl.subject;
+      $('#v11-bbody').value = dupTpl.body;
+      $('#v11-usubj').value = unpaidTpl.subject;
+      $('#v11-ubody').value = unpaidTpl.body;
       p.style.display = 'flex';
     };
     $('#v11-bcancel').onclick = () => { $('#v11-email-popup').style.display = 'none'; };
     $('#v11-bsave').onclick = () => {
       Storage.set(LS.BATCH_SUBJ, $('#v11-bsubj').value);
       Storage.set(LS.BATCH_BODY, $('#v11-bbody').value);
+      Storage.set(LS.UNPAID_SUBJ, $('#v11-usubj').value);
+      Storage.set(LS.UNPAID_BODY, $('#v11-ubody').value);
       $('#v11-email-popup').style.display = 'none';
-      toast('公版郵件已儲存', 'success');
+      // ★ V11.55:存完立刻重繪看板,讓卡片上的公版編輯框同步顯示新內容(否則兩邊會對不起來)
+      if (allOrders.length > 0) renderKanban();
+      toast('公版郵件已儲存(重複單 + 未付款兩組)', 'success');
     };
   }
 
@@ -1800,14 +1823,41 @@
       /已付款|付款成功|交易成功|完成/.test(o.payStatus || '')
     );
 
+    // ★ V11.55:補上 UNPAID_DUP / PENDING 兩個角色的實際指派條件
+    //   舊版只會產生 KEEP / CANCEL,這兩個角色從沒被指派過 → 看板標籤與 pickEmailTemplate 的分支都是死碼。
+    //   更危險的是舊版「沒有成功筆就用 ID 最大的當保留」:兩筆都還沒付款時,
+    //   客人會收到「已幫您取消較先前的訂單,只保留下訂成功的那筆」── 但根本沒有成功的那筆。
+    if (successOnes.length === 0) {
+      const codAll        = all.every(o => isCOD(o.payStatus));
+      const pureUnpaidAll = all.every(o => isUnpaid(o.payStatus) && !isCOD(o.payStatus));
+
+      if (codAll || pureUnpaidAll) {
+        // 情境 A / B:整組全貨到付款、或整組全純未付款 → 不發信,交客服判斷
+        order.dupRole    = 'PENDING';
+        order.needEmail  = false;
+        order.rowNote    = NOTE_TEMPLATES.DUP_PENDING;
+        order.rowMoveTab = '確認中';
+      } else if (isUnpaid(order.payStatus)) {
+        // 情境 E:混合的重複未付款 → 只有「未付款」那筆寄催繳信
+        order.dupRole    = 'UNPAID_DUP';
+        order.needEmail  = true;
+        order.rowNote    = NOTE_TEMPLATES.UNPAID_DUP;
+        order.rowMoveTab = '確認中';
+      } else {
+        // 情境 E 的另一半(例如刷卡失敗筆)→ 只寫備註。同一位客人不重複寄兩封
+        order.dupRole    = 'PENDING';
+        order.needEmail  = false;
+        order.rowNote    = NOTE_TEMPLATES.DUP_PENDING;
+        order.rowMoveTab = '確認中';
+      }
+      return;
+    }
+
     let keepOne;
     if (successOnes.length === 1) {
       keepOne = successOnes[0];
-    } else if (successOnes.length > 1) {
-      keepOne = [...successOnes].sort((a, b) => (a.id > b.id ? -1 : 1))[0];
     } else {
-      // 沒有明顯成功筆 → 用 ID 字典序最大當保留(防呆)
-      keepOne = [...all].sort((a, b) => (a.id > b.id ? -1 : 1))[0];
+      keepOne = [...successOnes].sort((a, b) => (a.id > b.id ? -1 : 1))[0];
     }
 
     if (order.id === keepOne.id) {
@@ -1830,9 +1880,9 @@
   /** 重複單情境判定(A/B/C/D/E)
    *  A:純未付款(線上刷卡尚未付款 / 等待付款 / 待確認付款) → 不發信,移交確認中
    *  B:兩筆皆貨到付款 / 超商取貨時付款 → 不發信,移交確認中(沿用 A 處理)
-   *  C:一筆貨到付款 + 一筆刷卡失敗 → 保留貨到付款,失敗筆寄信通知取消
-   *  D:一筆刷卡成功 + 一筆刷卡失敗 → 保留成功筆,失敗筆寄信通知取消
-   *  E:純重複未付款 → 寄催繳信並移交確認中
+   *  C:一筆貨到付款 + 一筆刷卡失敗 → 保留貨到付款,★ V11.55 寄信給「保留筆」,失敗筆只寫備註
+   *  D:一筆刷卡成功 + 一筆刷卡失敗 → 保留成功筆,★ V11.55 寄信給「保留筆」,失敗筆只寫備註
+   *  E:混合的重複未付款 → 未付款筆寄催繳信(dupRole=UNPAID_DUP),其餘 PENDING 不發信
    */
   function classifyDuplicateScenario(order) {
     const all = [order, ...order.relatedOrders.map(r => allOrders.find(o => o.id === r.id) || r)];
@@ -1846,11 +1896,11 @@
     // 情境 A:全部都是純未付款(線上刷卡尚未付款)
     if (pureUnpaid === all.length) return '【A】兩筆皆純未付款 → 不發信,移交確認中由客服判斷';
     // 情境 C:貨到付款 + 刷卡失敗
-    if (codCount >= 1 && failCount >= 1) return '【C】保留貨到付款,刷卡失敗筆寄信通知取消';
+    if (codCount >= 1 && failCount >= 1) return '【C】保留貨到付款 → 寄信通知保留筆,刷卡失敗筆只寫備註不發信';
     // 情境 D:刷卡成功 + 刷卡失敗
-    if (succCount >= 1 && failCount >= 1) return '【D】保留刷卡成功,失敗筆寄信通知取消';
+    if (succCount >= 1 && failCount >= 1) return '【D】保留刷卡成功 → 寄信通知保留筆,失敗筆只寫備註不發信';
     // 情境 E:其他重複未付款狀況 → 預設催繳
-    return '【E】重複未付款 → 寄催繳信並移交確認中';
+    return '【E】重複未付款 → 未付款筆寄催繳信,其餘只寫備註,全部移交確認中';
   }
 
   // ============================================================
@@ -1914,12 +1964,13 @@
       if (orders.length === 0) return;
 
       const showEmailSetup = (type === 'DUP' || type === 'UNPAID');
-      const defSubj = type === 'DUP' ? DEFAULT_EMAILS.DUP_CANCEL.subject :
-                      type === 'UNPAID' ? DEFAULT_EMAILS.UNPAID.subject :
-                      DEFAULT_EMAILS.NORMAL.subject;
-      const defBody = type === 'DUP' ? DEFAULT_EMAILS.DUP_CANCEL.body :
-                      type === 'UNPAID' ? DEFAULT_EMAILS.UNPAID.body :
-                      DEFAULT_EMAILS.NORMAL.body;
+      // ★ V11.55:改吃 getStoredTemplate,卡片顯示的就是「實際會寄出去」的那份
+      //   舊版永遠顯示常數,使用者在 popup 存的公版在這裡看不到,兩邊對不起來
+      const cardTpl = type === 'DUP' ? getStoredTemplate('DUP') :
+                      type === 'UNPAID' ? getStoredTemplate('UNPAID') :
+                      DEFAULT_EMAILS.NORMAL;
+      const defSubj = cardTpl.subject;
+      const defBody = cardTpl.body;
 
       const emailHTML = showEmailSetup ? `
         <div class="v11-email-setup" data-card-type="${type}">
@@ -2327,24 +2378,55 @@
     const subj = subjEl.value || '';
     const body = bodyEl.value || '';
     if (!subj.trim() && !body.trim()) return null;
+
+    // ★ V11.55:卡片編輯框是「預填好」的,不判斷有沒有被改過就永遠算覆寫,
+    //   會把該卡片的文案硬套到區內每一筆(例如 DUP 卡片裡的 UNPAID_DUP 筆該收催繳信卻收到重複單通知)。
+    //   → 與存檔公版一字不差時視為「使用者沒動過」,回傳 null 讓 pickEmailTemplate 逐筆決定
+    if (type === 'DUP' || type === 'UNPAID') {
+      const stored = getStoredTemplate(type === 'UNPAID' ? 'UNPAID' : 'DUP');
+      if (subj === stored.subject && body === stored.body) {
+        log(`[發信] ${type} 卡片公版未修改,改由每筆訂單自己的角色決定公版`);
+        return null;
+      }
+      log(`[發信] ${type} 卡片公版已被人工修改 → 本區所有發信筆一律套用卡片內容`);
+    }
     return { subject: subj, body };
   }
 
-  /** 依訂單的 dupRole / type 選對應公版(對話定版,V11.39 邏輯反轉)
-   *  - DUP + dupRole='KEEP'        → DUP_CANCEL 公版(★ 發信給保留筆客戶,通知「另一筆重複單已取消」)
+  /** 依訂單的 dupRole / type 選對應公版(V11.39 邏輯反轉,★ V11.55 改吃 popup 存檔值)
+   *  - DUP + dupRole='KEEP'        → 重複單公版(★ 發信給保留筆客戶,通知「另一筆重複單已取消」)
    *  - DUP + dupRole='CANCEL'      → null(★ 取消筆只寫備註,不發信)
-   *  - DUP + dupRole='UNPAID_DUP'  → UNPAID 公版(因為情境 E:全部都異常,視為未付款)
-   *  - DUP + dupRole='PENDING'     → null(不發信)
-   *  - UNPAID                       → UNPAID 公版
+   *  - DUP + dupRole='UNPAID_DUP'  → 未付款催繳公版(情境 E:整組無成功筆中的未付款那筆)
+   *  - DUP + dupRole='PENDING'     → null(不發信,交客服判斷)
+   *  - UNPAID                       → 未付款催繳公版
    *  - 其他                          → null(不發信)
    */
+  /** ★ V11.55 取「實際會寄出去」的公版:popup 存檔值優先,沒存過才退回程式內建常數
+   *  舊版 popup 把值寫進 localStorage 之後就沒有任何人讀它,發信永遠只用常數
+   *  → 使用者在 popup 改完公版、按了儲存,寄出去的信卻完全沒變。這裡把那條線接上
+   *  kind:'DUP'(重複單通知)/ 'UNPAID'(未付款催繳)
+   */
+  function getStoredTemplate(kind) {
+    if (kind === 'UNPAID') {
+      return {
+        subject: Storage.get(LS.UNPAID_SUBJ, DEFAULT_EMAILS.UNPAID.subject),
+        body:    Storage.get(LS.UNPAID_BODY, DEFAULT_EMAILS.UNPAID.body),
+      };
+    }
+    return {
+      subject: Storage.get(LS.BATCH_SUBJ, DEFAULT_EMAILS.DUP_CANCEL.subject),
+      body:    Storage.get(LS.BATCH_BODY, DEFAULT_EMAILS.DUP_CANCEL.body),
+    };
+  }
+
   function pickEmailTemplate(order, type) {
+    // ★ V11.55:回傳 null 就是「這筆不該發信」的權威判定,呼叫端不得繞過
     if (type === 'DUP') {
-      if (order.dupRole === 'KEEP')       return DEFAULT_EMAILS.DUP_CANCEL; // ★ 寄給保留筆
-      if (order.dupRole === 'UNPAID_DUP') return DEFAULT_EMAILS.UNPAID;
+      if (order.dupRole === 'KEEP')       return getStoredTemplate('DUP');   // ★ 寄給保留筆
+      if (order.dupRole === 'UNPAID_DUP') return getStoredTemplate('UNPAID');
       return null; // CANCEL / PENDING 不發信
     }
-    if (type === 'UNPAID') return DEFAULT_EMAILS.UNPAID;
+    if (type === 'UNPAID') return getStoredTemplate('UNPAID');
     return null;
   }
 
@@ -2451,6 +2533,19 @@
     const byType = {};
     orders.forEach(o => { (byType[o.type] = byType[o.type] || []).push(o); });
 
+    // ★ V11.55 失敗筆隔離(對話定版:失敗筆跳過,其他照跑)
+    //   舊版階段 A 完全沒接 processNoteForOrder / sendEmailForOrder 的回傳值,
+    //   兩者失敗都只寫 console warn → 客人沒收到信、備註沒寫進去,訂單卻照樣被移分頁、被分流出貨。
+    //   這是這支腳本最貴的 bug 類型:靜默失敗。現在失敗一定出聲,而且擋住後續階段。
+    const failed = new Map();   // 訂單編號 → 失敗原因陣列
+    const markFailed = (o, why) => {
+      const arr = failed.get(o.id) || [];
+      arr.push(why);
+      failed.set(o.id, arr);
+      warn('[階段 A 失敗] ' + o.id + ' ' + why);
+      toast(`⚠️ ${o.id} ${why} → 本筆不移分頁、不分流`, 'warn', 3500);
+    };
+
     // ── 階段 A:寫備註 + 發信(★ V11.39 改為跨頁執行:依 scanPage 分組逐頁處理)──
     for (const [t, group] of Object.entries(byType)) {
       const cardOverrideTpl = getCardEmailTemplate(t);
@@ -2461,16 +2556,31 @@
         for (const o of pageOrders) {
           toast(`📝 [${STRATEGY_NAMES[t]}] 處理 ${o.id}(第 ${pageNum} 頁)...`, 'info', 1200);
 
+          // ★ V11.55:先清掉上一筆殘留的 modal。發信失敗時舊版只點一次「關閉」,
+          //   關不掉就會蓋住下一筆的備註入口 → 一筆失敗會連鎖拖垮後面整批
+          forceCloseAllModals();
+          await sleep(300);
+
           // 1) 寫備註
-          await processNoteForOrder(o, t);
+          const noteOK = await processNoteForOrder(o, t);
+          if (!noteOK) markFailed(o, '寫商家備註失敗');
 
           // 2) 依 needEmail 發信
+          //    ★ V11.55:先問 pickEmailTemplate「這筆該不該寄」,再決定要不要套卡片公版。
+          //    舊版寫成 `cardOverrideTpl || pickEmailTemplate(...)`,而卡片編輯框永遠預填預設值、
+          //    永遠非空 → 「重複單取消筆不發信」那道閘門被完全繞過,取消筆只要被勾到就照寄。
           if (o.needEmail) {
-            const tpl = cardOverrideTpl || pickEmailTemplate(o, t);
-            if (tpl) {
-              await sendEmailForOrder(o, tpl.subject, tpl.body);
+            const baseTpl = pickEmailTemplate(o, t);
+            if (!baseTpl) {
+              const why = (t === 'DUP' && o.dupRole === 'CANCEL')  ? '重複單取消筆依規則不發信'
+                        : (t === 'DUP' && o.dupRole === 'PENDING') ? '重複單待客服判斷,不自動發信'
+                        : '此類型沒有對應公版';
+              warn(`[發信] ${o.id} 擋下:${why}`);
+              toast(`🚫 ${o.id} 不發信(${why})`, 'warn', 2200);
             } else {
-              warn(`[發信] ${o.id} 沒有可用公版,跳過`);
+              const tpl = cardOverrideTpl || baseTpl;
+              const sendOK = await sendEmailForOrder(o, tpl.subject, tpl.body);
+              if (!sendOK) markFailed(o, '發信失敗');
             }
           }
           await sleep(400);
@@ -2478,12 +2588,30 @@
       });
     }
 
+    // ── ★ V11.55 失敗筆隔離:階段 A 失敗的訂單不進階段 B/C,原地留在等待確認分頁 ──
+    let cleanByType = byType;
+    if (failed.size > 0) {
+      cleanByType = {};
+      for (const [t, group] of Object.entries(byType)) {
+        const keep = group.filter(o => !failed.has(o.id));
+        if (keep.length > 0) cleanByType[t] = keep;
+      }
+      const lines = [...failed.entries()].map(([id, whys]) => `・${id}:${whys.join('、')}`).join('\n');
+      warn(`[階段 A] ${failed.size} 筆失敗,已排除於階段 B/C:
+${lines}`);
+      toast(`⚠️ ${failed.size} 筆失敗,已跳過移分頁與分流`, 'warn', 6000);
+      alert(`⚠️ 以下 ${failed.size} 筆在階段 A 失敗
+已「不移分頁、不分流」原地保留,請手動處理:
+
+${lines}`);
+    }
+
     // ── 階段 B:批次移動分頁 ──
-    await batchMoveOrdersByType(byType);
+    await batchMoveOrdersByType(cleanByType);
 
     // ── 階段 C-1:DUP 保留筆「只點當天出貨按鈕」(不拋印、不切分頁)──
     // ★ V11.39:重複單保留筆只需要點綠/紅按鈕讓訂單分流到對應分頁,不做後續拋印
-    const dupKeepOrders = (byType.DUP || []).filter(o => o.dupRole === 'KEEP');
+    const dupKeepOrders = (cleanByType.DUP || []).filter(o => o.dupRole === 'KEEP');
     if (dupKeepOrders.length > 0) {
       toast(`🚀 DUP 保留筆 ${dupKeepOrders.length} 筆 → 自動分流當天出貨(僅點按鈕)`, 'info', 2800);
       log(`[階段 C-1] DUP 保留筆 ${dupKeepOrders.length} 筆,只跑 autoSplitForToday(不拋印、不切分頁)`);
@@ -2493,20 +2621,25 @@
     }
 
     // ── 階段 C-2:NORMAL 區「自動分流當天出貨 + 切分頁拋印」(完整流程)──
-    if (byType.NORMAL && byType.NORMAL.length > 0) {
+    if (cleanByType.NORMAL && cleanByType.NORMAL.length > 0) {
       const card = $('.v11-card[data-type="NORMAL"]');
       const which = (card && $('.v11-logistics-select', card)?.value) || 'all';
       const whichLabel = which === 'all' ? '全部(依物流自動分流)' : which;
-      toast(`🚀 NORMAL 區 ${byType.NORMAL.length} 筆 → 自動分流當天出貨 [${whichLabel}]`, 'info', 2500);
-      log(`[階段 C-2] NORMAL ${byType.NORMAL.length} 筆,跑完整 runLogisticsByGroup(分流+切分頁+拋印)`);
+      toast(`🚀 NORMAL 區 ${cleanByType.NORMAL.length} 筆 → 自動分流當天出貨 [${whichLabel}]`, 'info', 2500);
+      log(`[階段 C-2] NORMAL ${cleanByType.NORMAL.length} 筆,跑完整 runLogisticsByGroup(分流+切分頁+拋印)`);
       await sleep(800);
-      await runLogisticsByGroup(byType.NORMAL, which);
+      await runLogisticsByGroup(cleanByType.NORMAL, which);
     }
 
     // ── 階段 D:自動點擊原生「更新」按鈕 ──
     await clickNativeUpdate();
 
-    toast(`✅ 全流程完成!共處理 ${orders.length} 筆`, 'success', 5000);
+    // ★ V11.55:完成訊息要把失敗數講出來,不能只報總數讓人以為全過了
+    if (failed.size > 0) {
+      toast(`⚠️ 全流程結束:成功 ${orders.length - failed.size} 筆,失敗 ${failed.size} 筆(見上方清單)`, 'warn', 8000);
+    } else {
+      toast(`✅ 全流程完成!共處理 ${orders.length} 筆`, 'success', 5000);
+    }
   }
 
   /** 只跑物流(假設備註/發信已處理完)*/
@@ -2777,10 +2910,23 @@
 
     // 等待主旨輸入框出現
     const subjEl = await waitFor(() => $(FP.EMAIL_SUBJECT), 2500);
-    const bodyEl = await waitFor(() => $(FP.EMAIL_BODY), 800);
+    // ★ V11.55:內文框等待時間 800ms → 2500ms,與主旨框一致。
+    //   800ms 是「主旨已經出現、內文一定同時出現」的樂觀假設,平台稍慢就整筆失敗
+    const bodyEl = await waitFor(() => $(FP.EMAIL_BODY), 2500);
     if (!subjEl || !bodyEl) {
-      warn('[發信] 找不到 Email 主旨/內文輸入框', order.id);
-      closeAnyModal();
+      // ★ V11.55 失敗要出聲 + 留證據:舊版只寫一行 warn 就關掉 modal,
+      //   完全看不出是「哪一個框沒找到」,V11.54 的 body_code 指紋錯了整整一版都沒人發現。
+      //   這裡把 modal 內所有輸入框的 id / name 印出來,下次平台再改欄位名可以直接對照
+      warn(`[發信] 找不到輸入框(主旨 ${subjEl ? 'OK' : 'MISS'} / 內文 ${bodyEl ? 'OK' : 'MISS'})`, order.id);
+      const modalRoot = $('.modal-dialog') || $('.modal') || document;
+      const fields = modalRoot.querySelectorAll('input, textarea, select');
+      log(`[發信診斷] ${order.id} modal 內 ${fields.length} 個輸入欄位:`);
+      fields.forEach((f, i) => {
+        if (i >= 10) return;
+        log(`  [${i + 1}] <${f.tagName.toLowerCase()}> id="${f.id || ''}" name="${f.getAttribute('name') || ''}" type="${f.getAttribute('type') || ''}"`);
+      });
+      toast(`❌ ${order.id} 發信失敗:找不到輸入框(詳見 Console)`, 'error', 4000);
+      forceCloseAllModals();
       return false;
     }
 
@@ -2810,8 +2956,10 @@
     );
 
     if (!sendBtn) {
+      // ★ V11.55:改用 forceCloseAllModals,單次點「關閉」關不掉會蓋住下一筆的入口
       warn('[發信] 在 modal 內找不到「確認」發送按鈕', order.id);
-      closeAnyModal();
+      toast(`❌ ${order.id} 發信失敗:找不到確認按鈕`, 'error', 4000);
+      forceCloseAllModals();
       return false;
     }
 
