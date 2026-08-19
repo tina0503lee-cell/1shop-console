@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         🔥 1shop 出貨中控台 (V11.54 修分批第2批按鈕消失)
+// @name         🔥 1shop 出貨中控台 (V11.55 修發信內文框指紋 + 失敗筆隔離)
 // @namespace    http://tampermonkey.net/
 // @version      11.55.0
-// @description  V11.54 修 63 筆跨頁測試發現的「分批第 2 批拋印失敗」:「更多批次功能」按鈕是 1shop「有勾選訂單才由 Vue 渲染」的,V11.52 每批印後取消勾選(按鈕消失),第 2 批重新勾選後 Vue 需時間重繪按鈕,原本一次性 findBtnByText 常抓不到 → 第 2 批拋單/印單靜默跳過(第 1 批成功、第 2 批失敗)。修法:tryThrowAction / doPrintAction 找「更多批次功能」改為 waitFor 等待重試(4 秒),給 Vue 渲染時間。基於 V11.53 商品組合下拉透明統計
+// @description  V11.55 修四件事:①【根因】發信內文框指紋錯誤 —— 平台欄位是 body_code 不是 body,舊指紋永遠抓不到 → 主旨填得進、內文逾時 → 信框跳出來又自己關掉,信沒寄出(A 平台事實 P10)。②【靜默失敗】階段 A 沒接 processNoteForOrder / sendEmailForOrder 的回傳值,備註沒寫、信沒寄都只有 console warn,訂單照樣被移分頁出貨 → 改為失敗進清單、跳 toast、跑完彈 alert,且失敗筆不進階段 B/C。③【公版】popup 存的公版從來沒被讀取,使用者改了沒感覺 → 接上 getStoredTemplate 並拆重複單/未付款兩組;卡片編輯框只在真被改過時才覆寫(舊版永遠預填非空,把「取消筆不發信」閘門整條繞過)。④【死碼】dupRole 的 UNPAID_DUP / PENDING 從未被指派 → 補上實際條件,整組無成功筆時不再硬選 KEEP 寄出「已幫您取消」。基於 V11.54 分批拋印修正::「更多批次功能」按鈕是 1shop「有勾選訂單才由 Vue 渲染」的,V11.52 每批印後取消勾選(按鈕消失),第 2 批重新勾選後 Vue 需時間重繪按鈕,原本一次性 findBtnByText 常抓不到 → 第 2 批拋單/印單靜默跳過(第 1 批成功、第 2 批失敗)。修法:tryThrowAction / doPrintAction 找「更多批次功能」改為 waitFor 等待重試(4 秒),給 Vue 渲染時間。基於 V11.53 商品組合下拉透明統計
 // @author       Tina + Claude
 // @match        *://admin.1shop.tw/*
 // @run-at       document-idle
