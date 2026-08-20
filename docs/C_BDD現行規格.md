@@ -185,6 +185,7 @@ Scenario Outline: 訂單自動分類
     | 付款狀態「已付款/交易成功」   | NORMAL   | (空)            | 不移動  | false |
     | 付款狀態「貨到付款」          | NORMAL   | (空)            | 不移動  | false |
     | 付款狀態「超商取貨時付款」    | NORMAL   | (空)            | 不移動  | false |
+    | 付款狀態「已退款」            | UNPAID   | 已退款 待確認    | 確認中  | false |
     | **付款狀態不在 P12 清單內**    | UNPAID   | 付款狀態待確認   | 確認中  | false |
     | 顧客有多筆訂單                | DUP      | (依 dupRole)    | (依)    | (依)  |
 
@@ -200,12 +201,46 @@ Scenario: 可出貨用白名單,未收錄狀態一律擋下
   And 即使人工勾選發信,pickEmailTemplate 也應回傳 null 擋下
     註:成本不對稱 —— 黑名單漏一個是把貨寄給沒付錢的人,白名單漏一個只是多一筆人工
 
-Scenario: 付款狀態判定只看 .status-name
-  Given 付款狀態欄是 .status-name 加上天數/次數徽章(→ A 平台事實 P13)
-  And 某筆訂單顯示為「未付款」+ 3 天徽章,payStatus 串接後是 "未付款 3"
+Scenario Outline: 判定用整格文字做包含比對,順序即優先序
+  Given 金流欄一格內有交易管道 + 金流狀態 + 附註三段(→ A 平台事實 P14)
+  When 該格文字為 <整格文字>
+  Then 分組應為 <分組>
+
+  Examples:
+    | 整格文字                                                    | 分組     |
+    | LINE Pay ● 已付款 1 交易成功                                | paid     |
+    | ATM轉帳(統一金流虛擬帳戶) ○ 等待付款 1 虛擬帳戶 已取號       | pending  |
+    | 信用卡3期0利率 交易成功                                     | paid     |
+    | 信用卡24期0利率 交易成功                                    | paid     |
+    | 信用卡 交易成功 已退款                                      | refunded |
+    | 貨到付款 等待付款                                           | cod      |
+    | 貨到付款 交易取消                                           | dead     |
+    | LINE Pay 神秘新狀態                                         | unknown  |
+
+Scenario: 優先序不可調換 — 已退款贏過交易成功
+  Given 某筆訂單的金流欄同時出現「交易成功」與「已退款」
+  When 判定該筆
+  Then 分組應為 refunded,isPayable 應為 false
+    註:退款發生在交易成功之後,晚判就會誤出貨,而且錢已經退給客人了
+
+Scenario: 優先序不可調換 — 貨到付款贏過等待付款
+  Given 某筆貨到付款訂單的金流欄同時出現「等待付款」
+  When 判定該筆
+  Then 分組應為 cod,isPayable 應為 true
+    註:貨到付款的本質就是還沒付。順序錯了會讓所有貨到付款單被擋著並寄催繳信 ——
+      這層保護 V11.55 以前藏在 isUnpaid 的排除條件裡
+
+Scenario: 交易管道永遠不參與判定
+  Given 交易管道是開放清單(LINE Pay / 信用卡 / ATM轉帳 / 信用卡 N 期0利率…),期數會變動
+  Then 判定式不得比對任何管道名稱,也不得寫死分期期數
+
+Scenario: 徽章不得干擾判定
+  Given 金流欄的狀態帶有天數/次數徽章(→ A 平台事實 P13)
+  And 某筆訂單顯示為「未付款」+ 3 天徽章
   When 判定該筆的付款狀態
-  Then 應比對 payStatusName("未付款")而非串接字串
-  And 該筆應歸為 UNPAID 催繳,不得落到「未收錄」
+  Then 應歸為 UNPAID 催繳,不得落到「未收錄」
+    註:V11.56 曾改用精準比對而把徽章切掉(只看 .status-name),
+      V11.57 改為對整格文字做包含比對後,徽章不再需要特別處理
 
 Scenario Outline: 重複單的角色分流(dupRole)
   Given 一組同顧客的重複訂單,付款狀態組合為 <組合>
