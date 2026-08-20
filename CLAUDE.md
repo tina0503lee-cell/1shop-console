@@ -1,4 +1,3 @@
-<!-- v1.0 -->
 # 1shop 出貨中控台 — 開發協作規範
 
 ## 角色定位
@@ -26,7 +25,7 @@
 | 目標平台 | `admin.1shop.tw`（Vue 動態渲染） |
 | 主要腳本 | `src/1shop_ultimate.user.js` |
 | 執行方式 | Tampermonkey 以 `@require file://` 載入上述檔案，**存檔即生效，不需貼回 Tampermonkey**。stub 見 `tampermonkey_stub.user.js` |
-| 版號權威 | `src/1shop_ultimate.user.js` 內的 `const VERSION` ＋同檔 Metadata `@version`，兩者必須一致。stub 的 `@version` 固定不動。文件不標「對應版本」 |
+| 版號權威 | `src/1shop_ultimate.user.js` 內的 `const VERSION` ＋ Metadata（要同步哪幾個見閘門 3）。stub 的 `@version` 固定不動。文件不標「對應版本」 |
 | 版本歷史 / 待修清單 | `docs/E_變更紀錄與待修`（Notion 到位前的權威來源） |
 
 > Notion 藍圖頁尚未開通；期間變更紀錄、待修問題板、連結索引全部收在 **E 變更紀錄與待修**。
@@ -59,11 +58,12 @@
 | # | 動作 | 說明 |
 |---|---|---|
 | 1 | `node --check src/1shop_ultimate.user.js` | 語法檢查，**不通過不交付** |
-| 2 | 同檔更新 `const VERSION` 與 Metadata `@version` | 兩者一致；stub 不動 |
-| 3 | 加 `★ V11.XX:` 註解 | 標在每個修改點，寫「為什麼」。理由已入 A 者簡化為指向（→ D 註解與交付規範） |
-| 4 | 更新 `docs/C_BDD現行規格.md` | **改寫既有 scenario，不往下疊加新段落**（詳見該檔開頭紀律） |
-| 5 | 若確認新平台行為 → 先更新 `docs/A_平台事實.md` | 事實入檔 **早於** 寫 code |
-| 6 | 補一筆變更紀錄到 `docs/E_變更紀錄與待修` | 寫「為什麼」與「影響到什麼」，不只寫改了哪個函式 |
+| 2 | `node tests/pay_status.test.js` | 付款狀態與重複單分流的回歸測試。語法檢查抓不到「行為錯但語法對」 |
+| 3 | 同檔更新 `const VERSION` 與 Metadata `@version`、`@name`、`@description` | 四者一致；stub 不動 |
+| 4 | 加 `★ V11.XX:` 註解 | 標在每個修改點，寫「為什麼」。理由已入 A 者簡化為指向（→ D 註解與交付規範） |
+| 5 | 更新 `docs/C_BDD現行規格.md` | **改寫既有 scenario，不往下疊加新段落**（詳見該檔開頭紀律） |
+| 6 | 若確認新平台行為 → 先更新 `docs/A_平台事實.md` | 事實入檔 **早於** 寫 code |
+| 7 | 補一筆變更紀錄到 `docs/E_變更紀錄與待修` | 寫「為什麼」與「影響到什麼」，不只寫改了哪個函式 |
 
 ### 輸出規則
 - 改 code 只回報**變更區段**，不整檔重貼（會蓋掉使用者手改）

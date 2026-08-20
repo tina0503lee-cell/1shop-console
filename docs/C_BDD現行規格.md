@@ -172,13 +172,40 @@ Scenario Outline: 訂單自動分類
   And 預設 needEmail 應為 <發信>
 
   Examples:
-    | 條件                  | 類型     | 備註            | 分頁    | 發信  |
-    | SKU 含預購關鍵字       | PREORDER | 預購品處理中     | 暫存    | false |
-    | 折抵金額 > 0          | EXC      | 待折抵          | 確認中  | false |
-    | 收件地址含「海外」    | OVERSEAS | 海外單          | 確認中  | false |
-    | 付款狀態為「等待付款」| UNPAID   | 提醒付款        | 確認中  | true  |
-    | 顧客有多筆訂單        | DUP      | (依 dupRole)    | (依)    | (依)  |
-    | 其他                  | NORMAL   | (空)            | 不移動  | false |
+    | 條件                          | 類型     | 備註            | 分頁    | 發信  |
+    | SKU 含預購關鍵字               | PREORDER | 預購品處理中     | 暫存    | false |
+    | 折抵金額 > 0                  | EXC      | 待折抵          | 確認中  | false |
+    | 收件地址含「海外」            | OVERSEAS | 海外單          | 確認中  | false |
+    | 付款狀態「等待付款」          | UNPAID   | 提醒付款        | 確認中  | true  |
+    | 付款狀態「待確認付款」        | UNPAID   | 提醒付款        | 確認中  | true  |
+    | 付款狀態「未付款」(帶天數徽章) | UNPAID   | 提醒付款        | 確認中  | true  |
+    | 付款狀態「付款失敗」          | UNPAID   | 提醒付款        | 確認中  | true  |
+    | 付款狀態「交易逾時」          | UNPAID   | 提醒付款        | 確認中  | true  |
+    | 付款狀態「交易取消」          | UNPAID   | 提醒付款        | 確認中  | true  |
+    | 付款狀態「已付款/交易成功」   | NORMAL   | (空)            | 不移動  | false |
+    | 付款狀態「貨到付款」          | NORMAL   | (空)            | 不移動  | false |
+    | 付款狀態「超商取貨時付款」    | NORMAL   | (空)            | 不移動  | false |
+    | **付款狀態不在 P12 清單內**    | UNPAID   | 付款狀態待確認   | 確認中  | false |
+    | 顧客有多筆訂單                | DUP      | (依 dupRole)    | (依)    | (依)  |
+
+Scenario: 可出貨用白名單,未收錄狀態一律擋下
+  Given 付款狀態只有「已付款/交易成功/貨到付款/超商取貨時付款」四種算可出貨
+  When 掃到一筆付款狀態是 P12 清單以外的字串(例如平台新增的狀態)
+  Then 該訂單的 type 應為 UNPAID 但 payUnknown 應為 true
+  And 備註應為「付款狀態待確認」,needEmail 應為 false
+  And 該訂單列應顯示「⚠️ 付款狀態未收錄,不出貨」標籤
+  And 付款狀態欄應套用 v11-status-unknown 醒目樣式
+  When 掃描結束
+  Then 應彈出 alert 列出所有未收錄的狀態文字,要求回報補進 P12
+  And 即使人工勾選發信,pickEmailTemplate 也應回傳 null 擋下
+    註:成本不對稱 —— 黑名單漏一個是把貨寄給沒付錢的人,白名單漏一個只是多一筆人工
+
+Scenario: 付款狀態判定只看 .status-name
+  Given 付款狀態欄是 .status-name 加上天數/次數徽章(→ A 平台事實 P13)
+  And 某筆訂單顯示為「未付款」+ 3 天徽章,payStatus 串接後是 "未付款 3"
+  When 判定該筆的付款狀態
+  Then 應比對 payStatusName("未付款")而非串接字串
+  And 該筆應歸為 UNPAID 催繳,不得落到「未收錄」
 
 Scenario Outline: 重複單的角色分流(dupRole)
   Given 一組同顧客的重複訂單,付款狀態組合為 <組合>
@@ -186,15 +213,42 @@ Scenario Outline: 重複單的角色分流(dupRole)
   Then 各筆的 dupRole 應為 <角色>
   And 預設備註應為 <備註>,預設發信應為 <發信>
 
+  **規則只有一條**:會成立的付款(已付款/交易成功/貨到付款/超商取貨時付款)
+  「恰好 1 筆」→ 保留那筆並發信,其餘只寫備註並取消;
+  其他一切(0 筆、或 2 筆以上會成立)→ 全部不發信,寫備註移確認中交客服。
+
   Examples:
-    | 組合                      | 角色                    | 備註                | 發信       |
-    | 刷卡成功 + 刷卡失敗       | 成功筆 KEEP / 失敗筆 CANCEL | (空)/ 重複訂單 此筆取消 | true/false |
-    | 貨到付款 + 刷卡失敗       | 貨到付款筆 KEEP / 失敗筆 CANCEL | (空)/ 重複訂單 此筆取消 | true/false |
-    | 兩筆皆貨到付款            | 全部 PENDING            | 重複訂單 待客服確認  | false      |
-    | 兩筆皆純未付款            | 全部 PENDING            | 重複訂單 待客服確認  | false      |
-    | 未付款 + 刷卡失敗         | 未付款筆 UNPAID_DUP / 失敗筆 PENDING | 提醒付款，重複訂單幫關心 / 重複訂單 待客服確認 | true/false |
-    註:整組都沒有「明顯成功筆」時不得硬選一筆當 KEEP —— 否則客人會收到
-      「已幫您取消,只保留下訂成功的那筆」,但根本沒有成功的那筆
+    | 組合                        | 角色                        | 備註                          | 發信       |
+    | 交易成功 + 付款失敗         | 成功筆 KEEP / 另一筆 CANCEL | (空) / 重複訂單 此筆取消      | true/false |
+    | 貨到付款 + 付款失敗         | 貨到付款筆 KEEP / CANCEL    | (空) / 重複訂單 此筆取消      | true/false |
+    | 貨到付款 + 等待付款         | 貨到付款筆 KEEP / CANCEL    | (空) / 重複訂單 此筆取消      | true/false |
+    | 交易成功 + 未付款           | 成功筆 KEEP / CANCEL        | (空) / 重複訂單 此筆取消      | true/false |
+    | 超商取貨時付款 + 交易取消   | 超商筆 KEEP / CANCEL        | (空) / 重複訂單 此筆取消      | true/false |
+    | 兩筆皆貨到付款              | 全部 PENDING                | 重複訂單 幫關心               | false      |
+    | 兩筆皆等待付款              | 全部 PENDING                | 重複訂單 幫關心               | false      |
+    | 等待付款 + 付款失敗         | 全部 PENDING                | 重複訂單 幫關心               | false      |
+    | 兩筆皆付款失敗              | 全部 PENDING                | 重複訂單 幫關心               | false      |
+    | **兩筆皆交易成功(重複付款)** | 全部 PENDING                | 重複訂單 幫關心               | false      |
+    | 未收錄狀態 + 交易成功       | 成功筆 KEEP / CANCEL        | (空) / 重複訂單 此筆取消      | true/false |
+
+Scenario: 診斷字串與實際分流必須同源
+  Given classifyDuplicateScenario 產生看板上的診斷字串
+  And applyDupKeepOrCancel 決定實際的角色與發信
+  Then 兩者都必須呼叫同一個 judgeDupGroup,不得各自重算
+    註:V11.55 以前兩者各算一次,漂移出「看板寫【B】不發信、實際卻寄信」
+      與「看板寫【E】重複未付款、實際兩筆都刷卡成功」兩種說一套做一套
+
+Scenario: 重複付款(2 筆以上已成立)不得自動取消
+  Given 同一顧客兩筆訂單付款狀態都是「交易成功」
+  When 掃描完成
+  Then 兩筆的 dupRole 都應為 PENDING
+  And 都不應發信,都應移「確認中」
+    註:錢已經收了兩筆,涉及退款。把訂單移到「已取消」不等於處理完,
+      自動寄「已幫您取消」但錢沒退會造成客訴
+
+Scenario: UNPAID_DUP 角色已退役
+  Given V11.56 起沒有任何情境會指派 dupRole = 'UNPAID_DUP'
+  Then 公版分支、看板標籤、NOTE_TEMPLATES.UNPAID_DUP 都應已移除
 
 Scenario: 訂單分類優先序
   Given 一筆訂單同時符合「預購 + 未付款」
@@ -1046,6 +1100,7 @@ Scenario: 升版前手動 checklist
     ☐ 3. Metadata @name 有同步更新(便於使用者辨識)
     ☐ 4. Metadata @description 有列出本次修改內容
     ☐ 5. node --check 通過語法檢查
+    ☐ 5b. node tests/pay_status.test.js 全數通過(付款狀態 / 重複單分流回歸測試)
     ☐ 6. 重點修改點有 ★ V11.XX 註解
     ☐ 7. 沒留下未完成的 console.log 除錯訊息
     ☐ 8. 沒留下被註解掉的舊邏輯(除非有特別保留原因)
