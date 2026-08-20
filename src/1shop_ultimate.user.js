@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         🔥 1shop 出貨中控台 (V11.55 修發信內文框指紋 + 失敗筆隔離)
+// @name         🔥 1shop 出貨中控台 (V11.56 付款狀態白名單 + 重複單單一判定)
 // @namespace    http://tampermonkey.net/
-// @version      11.55.0
-// @description  V11.55 修四件事:①【根因】發信內文框指紋錯誤 —— 平台欄位是 body_code 不是 body,舊指紋永遠抓不到 → 主旨填得進、內文逾時 → 信框跳出來又自己關掉,信沒寄出(A 平台事實 P10)。②【靜默失敗】階段 A 沒接 processNoteForOrder / sendEmailForOrder 的回傳值,備註沒寫、信沒寄都只有 console warn,訂單照樣被移分頁出貨 → 改為失敗進清單、跳 toast、跑完彈 alert,且失敗筆不進階段 B/C。③【公版】popup 存的公版從來沒被讀取,使用者改了沒感覺 → 接上 getStoredTemplate 並拆重複單/未付款兩組;卡片編輯框只在真被改過時才覆寫(舊版永遠預填非空,把「取消筆不發信」閘門整條繞過)。④【死碼】dupRole 的 UNPAID_DUP / PENDING 從未被指派 → 補上實際條件,整組無成功筆時不再硬選 KEEP 寄出「已幫您取消」。基於 V11.54 分批拋印修正::「更多批次功能」按鈕是 1shop「有勾選訂單才由 Vue 渲染」的,V11.52 每批印後取消勾選(按鈕消失),第 2 批重新勾選後 Vue 需時間重繪按鈕,原本一次性 findBtnByText 常抓不到 → 第 2 批拋單/印單靜默跳過(第 1 批成功、第 2 批失敗)。修法:tryThrowAction / doPrintAction 找「更多批次功能」改為 waitFor 等待重試(4 秒),給 Vue 渲染時間。基於 V11.53 商品組合下拉透明統計
+// @version      11.56.0
+// @description  V11.56 重寫付款狀態判定:①【最嚴重】「付款失敗/交易逾時/交易取消」三種狀態原本四個判定式全部落空,classifyOrders 掉到 else → 歸成「可出貨一般單」→ 被自動拋單出貨,也就是把貨寄給沒付錢的人(這三種狀態確實會出現在等待確認分頁)。修法:改用「可出貨白名單」,只有已付款/交易成功/貨到付款/超商取貨時付款算可出貨,其餘一律不出貨;未收錄的新狀態不出貨也不發信,並出聲提示。②判定只比對 .status-name(付款狀態欄還有天數/次數徽章,串接後永遠對不上)。③重複單改為單一情境判定 judgeDupGroup,規則收斂成一條:會成立的付款恰好 1 筆才保留並發信,其餘一切交客服 —— 修掉「兩筆都貨到付款/都刷卡成功卻自動取消一筆並寄信」與「看板顯示與實際行為相反」。④UNPAID_DUP 角色退役。基於 V11.55:①【根因】發信內文框指紋錯誤 —— 平台欄位是 body_code 不是 body,舊指紋永遠抓不到 → 主旨填得進、內文逾時 → 信框跳出來又自己關掉,信沒寄出(A 平台事實 P10)。②【靜默失敗】階段 A 沒接 processNoteForOrder / sendEmailForOrder 的回傳值,備註沒寫、信沒寄都只有 console warn,訂單照樣被移分頁出貨 → 改為失敗進清單、跳 toast、跑完彈 alert,且失敗筆不進階段 B/C。③【公版】popup 存的公版從來沒被讀取,使用者改了沒感覺 → 接上 getStoredTemplate 並拆重複單/未付款兩組;卡片編輯框只在真被改過時才覆寫(舊版永遠預填非空,把「取消筆不發信」閘門整條繞過)。④【死碼】dupRole 的 UNPAID_DUP / PENDING 從未被指派 → 補上實際條件,整組無成功筆時不再硬選 KEEP 寄出「已幫您取消」。基於 V11.54 分批拋印修正::「更多批次功能」按鈕是 1shop「有勾選訂單才由 Vue 渲染」的,V11.52 每批印後取消勾選(按鈕消失),第 2 批重新勾選後 Vue 需時間重繪按鈕,原本一次性 findBtnByText 常抓不到 → 第 2 批拋單/印單靜默跳過(第 1 批成功、第 2 批失敗)。修法:tryThrowAction / doPrintAction 找「更多批次功能」改為 waitFor 等待重試(4 秒),給 Vue 渲染時間。基於 V11.53 商品組合下拉透明統計
 // @author       Tina + Claude
 // @match        *://admin.1shop.tw/*
 // @run-at       document-idle
@@ -19,7 +19,7 @@
   // ============================================================
   //  ⓪ 全域常數 / 設定
   // ============================================================
-  const VERSION = 'V11.55';
+  const VERSION = 'V11.56';
   const LS = {
     PRE_KWS: 'v11_preorder_kws',          // 預購關鍵字
     SCAN_PAGES: 'v11_scan_pages',         // 深潛頁數
@@ -109,11 +109,11 @@
       body: `Dear您好~這裡是GAME'NIR酒吧小編
 已收到您的訂單【{{product_name}}】
 
-出貨部門同事已列入排程中囉~不過您的訂單 {{order_number}} 尚未完成下訂流程QAQ
-需要完成流程後,系統才會讓我們幫您安排出貨唷~
+出貨部門同事已列入排程中囉~不過您的訂單{{order_number}} 尚未完成下訂流程QAQ
+需要完成流程後，系統才會讓我們幫您安排出貨唷~
 
 如果您需要確認訂單或是更改其它線上金流
-可以到官方LINE直接留下問題並留言「客服夥伴來支援」後,等待真人小編優先來協助!謝謝您💕`,
+可以到官方LINE直接留下問題並留言「客服夥伴來支援」後，等待真人小編優先來協助！謝謝您💕`,
     },
     // 重複單取消通知(較舊筆要寄出)
     DUP_CANCEL: {
@@ -129,15 +129,16 @@
   // ── 商家備註公版(對話定版)──
   //   會自動在前面贅加 "MM/DD " 日期前綴
   const NOTE_TEMPLATES = {
-    // ★ V11.55【待 Tina 定版】情境 A/B(整組都沒有成功筆)的備註文案,先給暫定值
-    DUP_PENDING: '重複訂單 待客服確認',
+    // ★ V11.56 對話定版:整組無「會成立的付款」、或有 2 筆以上會成立時的備註
+    DUP_PENDING: '重複訂單 幫關心',
     DUP_KEEP:    '',                      // 重複單較新筆(保留):備註空白
     DUP_CANCEL:  '重複訂單 此筆取消',     // 重複單較舊筆(取消)
     UNPAID:      '提醒付款',              // 單筆未付款
-    UNPAID_DUP:  '提醒付款，重複訂單幫關心', // 多筆皆異常的未付款
     PREORDER:    '預購品處理中',
     EXC:         '待折抵',
     OVERSEAS:    '海外單',
+    // ★ V11.56:付款狀態不在 A 平台事實 P12 已知清單內 → 不出貨、不發信,交人工確認
+    PAY_UNKNOWN: '付款狀態待確認',
   };
 
   // ── 訂單分類順序 ──
@@ -358,33 +359,50 @@
     return null;
   }
 
-  /** 偵測「未付款」(排除貨到付款/超商取貨時付款)*/
-  function isUnpaid(statusText) {
-    if (!statusText) return false;
-    if (statusText.includes('超商取貨時付款') || statusText.includes('貨到付款')) return false;
-    return (statusText.includes('未付款')
-      || statusText.includes('等待付款')
-      || statusText.includes('待確認付款'))
-      && !statusText.includes('交易成功');
-  }
+  // ══════════════════════════════════════════════════════════
+  //  ★ V11.56 付款狀態判定(→ A 平台事實 P12 / P13)
+  //
+  //  為什麼整組重寫:舊版四個判定式用「關鍵字猜測」——
+  //    isUnpaid   只認「未付款/等待付款/待確認付款」三種字樣
+  //    isCardSuccess 只要含「線上/刷卡/信用卡」又不含「失敗」就算付款成功
+  //  結果「付款失敗」「交易逾時」「交易取消」三種真實狀態四個判定式全部落空,
+  //  classifyOrders 掉到最後的 else → 歸成 NORMAL 可出貨 → 被階段 C 拋單印單。
+  //  那是「把貨寄給沒付錢的人」的路徑,而且這三種狀態確實會留在等待確認分頁(Tina 2026-08-19 確認)。
+  //
+  //  設計反轉為「可出貨白名單」:只有 PAYABLE 四種算可出貨,其餘一切(含未來新增、
+  //  我們沒見過的字串)一律不出貨。理由是成本不對稱 —— 黑名單漏一個是把貨寄給沒付錢的人,
+  //  白名單漏一個只是多一筆要人工看。P12 的清單本身就不保證窮盡(首次抄錄漏了「超商取貨時付款」)。
+  //
+  //  比對對象是 .status-name,不是串接後的 payStatus(P13:欄內還有天數/次數徽章,
+  //  「未付款」+ 3 天徽章會被串成 "未付款 3",拿去精準比對永遠對不上)。
+  // ══════════════════════════════════════════════════════════
+  const PAY_STATUS = {
+    PAYABLE: ['已付款', '交易成功', '貨到付款', '超商取貨時付款'],  // 會成立 → 可出貨
+    PENDING: ['等待付款', '待確認付款', '未付款'],                  // 還可能完成 → 催繳
+    DEAD:    ['付款失敗', '交易逾時', '交易取消'],                  // 不會完成 → 催繳(對話定版 2026-08-19)
+  };
 
-  /** 偵測「貨到付款 / 超商取貨時付款」*/
-  function isCOD(statusText) {
-    if (!statusText) return false;
-    return statusText.includes('貨到付款') || statusText.includes('超商取貨時付款');
+  /** 取「用來做判定」的付款狀態名
+   *  優先用 .status-name(乾淨的狀態文字)。缺失時(例如 relatedOrders 的精簡物件)退回串接字串,
+   *  並取第一段 —— 因為 payStatus 是「狀態名 + 徽章」用空格串成的(P13),
+   *  直接拿 "未付款 3" 去精準比對會落到「未收錄」,那是假警報。
+   */
+  function payName(order) {
+    const raw = order && (order.payStatusName ?? order.payStatus);
+    return String(raw || '').trim().split(/\s+/)[0];
   }
+  function payIs(order, list) { return list.includes(payName(order)); }
 
-  /** 偵測「刷卡失敗 / 交易失敗」*/
-  function isCardFail(statusText) {
-    if (!statusText) return false;
-    return /失敗|fail/i.test(statusText) && !statusText.includes('交易成功');
-  }
-
-  /** 偵測「線上刷卡成功」*/
-  function isCardSuccess(statusText) {
-    if (!statusText) return false;
-    return statusText.includes('交易成功') || (/(信用卡|刷卡|線上)/.test(statusText) && !isCardFail(statusText));
-  }
+  /** 會成立的付款(可出貨)*/
+  function isPayable(order)     { return payIs(order, PAY_STATUS.PAYABLE); }
+  /** 尚未完成但還可能完成 */
+  function isPendingPay(order)  { return payIs(order, PAY_STATUS.PENDING); }
+  /** 不會完成(付款失敗/逾時/取消)*/
+  function isDeadPay(order)     { return payIs(order, PAY_STATUS.DEAD); }
+  /** 是否為 P12 已收錄的狀態。false = 沒見過的字串,一律不出貨並出聲 */
+  function isKnownPayStatus(o)  { return isPayable(o) || isPendingPay(o) || isDeadPay(o); }
+  /** 貨到付款 / 超商取貨時付款(兩者皆為 2026-08-19 確認仍存在的狀態)*/
+  function isCOD(order)         { return payIs(order, ['貨到付款', '超商取貨時付款']); }
 
   /** 從 1shop 列表行抓出訂單編號 */
   function getOrderIdFromRow(tr) {
@@ -627,6 +645,8 @@
     .v11-status-unpaid { color: #e74c3c; font-weight: bold; }
     .v11-status-cod    { color: #8e44ad; font-weight: bold; }
     .v11-status-fail   { color: #c0392b; font-weight: bold; }
+    /* ★ V11.56 未收錄的付款狀態:醒目底色,不能讓它看起來像正常狀態 */
+    .v11-status-unknown { color: #fff; background: #c0392b; font-weight: bold; padding: 1px 6px; border-radius: 4px; }
 
     /* ★ V11.44:card-footer 改 sticky 吸附底部 — 長清單滾動時操作區(物流/組合下拉+按鈕)不會被滾走 */
     .v11-card-footer { padding: 12px 16px; background: #fafafa; border-top: 1px solid #eee;
@@ -1143,6 +1163,21 @@
       classifyOrders(preKws);
 
       renderKanban();
+      // ★ V11.56 未收錄付款狀態彙總出聲:A 平台事實 P12 的清單不保證窮盡,
+      //   平台新增狀態時第一次掃描就要讓使用者知道,而不是安靜地被歸成「不出貨」
+      const unknownPays = allOrders.filter(o => o.payUnknown);
+      if (unknownPays.length > 0) {
+        const kinds = [...new Set(unknownPays.map(o => o.payStatusName || o.payStatus))];
+        const lines = kinds.map(k => `・「${k}」`).join('\n');
+        warn(`[分類] 出現 ${kinds.length} 種未收錄的付款狀態,共 ${unknownPays.length} 筆`);
+        toast(`⚠️ ${unknownPays.length} 筆的付款狀態未收錄,已擋著不出貨`, 'warn', 8000);
+        alert(`⚠️ 掃到 ${unknownPays.length} 筆「付款狀態未收錄」的訂單:
+
+${lines}
+
+這些訂單已自動設為不出貨、不發信、移確認中。
+請把上面的狀態文字回報,補進 A 平台事實 P12 後才會正確分類。`);
+      }
       toast(`✅ 掃描完成:共 ${allOrders.length} 筆`, 'success', 3000);
     } catch (e) {
       err('掃描失敗', e);
@@ -1247,6 +1282,7 @@
       // td[5]:付款狀態(.status-name + .badge-circle + .badge-times)
       // ══════════════════════════════════════
       let payStatus = '';
+      let payStatusName = '';   // ★ V11.56 判定專用(不含徽章)
       const payTd = tds[5];
       if (payTd) {
         const statusName = (payTd.querySelector('.status-name')?.innerText || '').trim();
@@ -1255,6 +1291,9 @@
         const parts = [statusName, badge];
         if (badgeTimes && badgeTimes !== '0') parts.push(badgeTimes);
         payStatus = parts.filter(Boolean).join(' ');
+        // ★ V11.56:.status-name 單獨留一份給付款狀態判定用(→ A 平台事實 P13)
+        //   payStatus 串了天數/次數徽章(「未付款」+3天 → "未付款 3"),拿去精準比對永遠對不上
+        payStatusName = statusName;
       }
 
       // ══════════════════════════════════════
@@ -1316,7 +1355,7 @@
       }
 
       return {
-        id, phone, customer, amount, payStatus, shipText, shipShort, date,
+        id, phone, customer, amount, payStatus, payStatusName, shipText, shipShort, date,
         hasPreorder, isExc, isOverseas,
         product, customerNote, merchantNote,
         comboLabel,           // ★ V11.44:短格式商品組合標籤,供 NORMAL 區組合過濾選單顯示
@@ -1676,7 +1715,7 @@
         // 同電話多筆 → 標記為重複,並彼此互為 relatedOrders
         group.forEach(o => {
           o.relatedOrders = group.filter(x => x.id !== o.id).map(x => ({
-            id: x.id, payStatus: x.payStatus, amount: x.amount,
+            id: x.id, payStatus: x.payStatus, payStatusName: x.payStatusName, amount: x.amount,
           }));
           // 老顧客標記:同電話含自己共 N 筆
           o.loyaltyCount = group.length;
@@ -1718,16 +1757,28 @@
         o.rowNote = NOTE_TEMPLATES.OVERSEAS;     // ★ 不含日期
         o.rowMoveTab = '確認中';
         o.needEmail = false;
-      } else if (isUnpaid(o.payStatus)) {
+      } else if (isPendingPay(o) || isDeadPay(o)) {
+        // ★ V11.56:「付款失敗/交易逾時/交易取消」也歸這裡(對話定版 2026-08-19:一律寄催繳信)
+        //   舊版這三種狀態四個判定式全部落空 → 掉到 else 變 NORMAL → 被拋單出貨
         o.type = 'UNPAID';
         o.rowNote = NOTE_TEMPLATES.UNPAID;       // ★ 不含日期(自動化執行時加)
         o.rowMoveTab = '確認中';
         o.needEmail = true;
-      } else {
+      } else if (isPayable(o)) {
         o.type = 'NORMAL';
         o.rowNote = '';
         o.rowMoveTab = '不移動';   // ★ V11.39:NORMAL 預設不移動分頁(物流拋單流程內部會自動處理狀態)
         o.needEmail = false;
+      } else {
+        // ★ V11.56 白名單的兜底:付款狀態不在 P12 已知清單內 → 絕對不出貨、不發信,交人工
+        //   這是刻意的保守選擇。對狀態不明的訂單寄催繳信有風險(萬一那個新狀態其實代表已付款,
+        //   就是催繳已經付錢的客人),所以只寫備註 + 出聲,不自動聯繫客人
+        o.type = 'UNPAID';          // 借用 UNPAID 卡片顯示,但不發信
+        o.payUnknown = true;
+        o.rowNote = NOTE_TEMPLATES.PAY_UNKNOWN;
+        o.rowMoveTab = '確認中';
+        o.needEmail = false;
+        warn(`[分類] ${o.id} 付款狀態未收錄:「${o.payStatusName || o.payStatus}」→ 不出貨、不發信,交人工確認`);
       }
     });
   }
@@ -1812,55 +1863,53 @@
    *    - KEEP:空白
    *    - CANCEL:`重複訂單 此筆取消`(★ 不含日期前贅,自動化執行時才動態加 MM/DD)
    */
+  /** ★ V11.56 重複單「單一情境判定」—— 診斷字串與實際分流共用同一份計算
+   *
+   *  為什麼要合併:舊版 classifyDuplicateScenario(產生看板上那句診斷)與 applyDupKeepOrCancel
+   *  (決定真正怎麼分流)各自獨立判斷一次,必然漂移。實測到兩處說一套做一套:
+   *    - 兩筆皆貨到付款:看板寫「【B】不發信」,實際卻取消一筆並寄「已幫您取消」
+   *    - 兩筆皆刷卡成功:看板寫「【E】重複未付款」,實際取消一筆並寄信(錢已經收了兩筆)
+   *
+   *  規則收斂成一條(對話定版 2026-08-19):
+   *    會成立的付款「恰好 1 筆」→ 保留那筆並發信,其餘只寫備註並取消
+   *    其他一切(0 筆、或 2 筆以上會成立)→ 全部不發信,寫備註移確認中交客服
+   *
+   *  0 筆 = 整組都還沒付款,沒有依據判定要保留哪筆。
+   *  2 筆以上 = 真的重複付款或重複貨到付款,涉及退款,不是把訂單移到「已取消」就算處理完。
+   */
+  function judgeDupGroup(all) {
+    const payable = all.filter(o => isPayable(o));
+    if (payable.length === 1) {
+      const keep = payable[0];
+      return {
+        mode: 'KEEP_ONE',
+        keepId: keep.id,
+        label: `【保留 1 筆】${isCOD(keep) ? '貨到付款' : '已完成付款'}筆保留並發信,其餘 ${all.length - 1} 筆只寫備註並取消`,
+      };
+    }
+    if (payable.length === 0) {
+      return { mode: 'ALL_PENDING', keepId: null,
+        label: `【全待確認】${all.length} 筆都沒有完成付款 → 不發信,移確認中交客服判斷` };
+    }
+    return { mode: 'ALL_PENDING', keepId: null,
+      label: `【全待確認】${payable.length} 筆都已成立付款(疑重複付款/重複貨到付款)→ 不發信,涉及退款須人工處理` };
+  }
+
   function applyDupKeepOrCancel(order /*, todayMMDD 已不需要 */) {
     const all = [order, ...order.relatedOrders.map(r => allOrders.find(o => o.id === r.id)).filter(Boolean)];
     if (all.length < 2) return;
 
-    // 找「明顯成功」的訂單
-    const successOnes = all.filter(o =>
-      isCardSuccess(o.payStatus) ||
-      isCOD(o.payStatus) ||
-      /已付款|付款成功|交易成功|完成/.test(o.payStatus || '')
-    );
+    const judged = judgeDupGroup(all);
 
-    // ★ V11.55:補上 UNPAID_DUP / PENDING 兩個角色的實際指派條件
-    //   舊版只會產生 KEEP / CANCEL,這兩個角色從沒被指派過 → 看板標籤與 pickEmailTemplate 的分支都是死碼。
-    //   更危險的是舊版「沒有成功筆就用 ID 最大的當保留」:兩筆都還沒付款時,
-    //   客人會收到「已幫您取消較先前的訂單,只保留下訂成功的那筆」── 但根本沒有成功的那筆。
-    if (successOnes.length === 0) {
-      const codAll        = all.every(o => isCOD(o.payStatus));
-      const pureUnpaidAll = all.every(o => isUnpaid(o.payStatus) && !isCOD(o.payStatus));
-
-      if (codAll || pureUnpaidAll) {
-        // 情境 A / B:整組全貨到付款、或整組全純未付款 → 不發信,交客服判斷
-        order.dupRole    = 'PENDING';
-        order.needEmail  = false;
-        order.rowNote    = NOTE_TEMPLATES.DUP_PENDING;
-        order.rowMoveTab = '確認中';
-      } else if (isUnpaid(order.payStatus)) {
-        // 情境 E:混合的重複未付款 → 只有「未付款」那筆寄催繳信
-        order.dupRole    = 'UNPAID_DUP';
-        order.needEmail  = true;
-        order.rowNote    = NOTE_TEMPLATES.UNPAID_DUP;
-        order.rowMoveTab = '確認中';
-      } else {
-        // 情境 E 的另一半(例如刷卡失敗筆)→ 只寫備註。同一位客人不重複寄兩封
-        order.dupRole    = 'PENDING';
-        order.needEmail  = false;
-        order.rowNote    = NOTE_TEMPLATES.DUP_PENDING;
-        order.rowMoveTab = '確認中';
-      }
+    if (judged.mode === 'ALL_PENDING') {
+      order.dupRole    = 'PENDING';
+      order.needEmail  = false;
+      order.rowNote    = NOTE_TEMPLATES.DUP_PENDING;   // 「重複訂單 幫關心」
+      order.rowMoveTab = '確認中';
       return;
     }
 
-    let keepOne;
-    if (successOnes.length === 1) {
-      keepOne = successOnes[0];
-    } else {
-      keepOne = [...successOnes].sort((a, b) => (a.id > b.id ? -1 : 1))[0];
-    }
-
-    if (order.id === keepOne.id) {
+    if (order.id === judged.keepId) {
       // 保留筆 → 發信通知客戶
       order.dupRole = 'KEEP';
       order.needEmail = true;
@@ -1877,30 +1926,14 @@
     }
   }
 
-  /** 重複單情境判定(A/B/C/D/E)
-   *  A:純未付款(線上刷卡尚未付款 / 等待付款 / 待確認付款) → 不發信,移交確認中
-   *  B:兩筆皆貨到付款 / 超商取貨時付款 → 不發信,移交確認中(沿用 A 處理)
-   *  C:一筆貨到付款 + 一筆刷卡失敗 → 保留貨到付款,★ V11.55 寄信給「保留筆」,失敗筆只寫備註
-   *  D:一筆刷卡成功 + 一筆刷卡失敗 → 保留成功筆,★ V11.55 寄信給「保留筆」,失敗筆只寫備註
-   *  E:混合的重複未付款 → 未付款筆寄催繳信(dupRole=UNPAID_DUP),其餘 PENDING 不發信
+  /** 重複單情境的看板診斷字串
+   *  ★ V11.56:不再自己算一次情境,改為呼叫 judgeDupGroup —— 那裡是唯一的判定來源。
+   *  舊版 A/B/C/D/E 五個情境各自用 codCount / pureUnpaid / failCount / succCount 重算,
+   *  與 applyDupKeepOrCancel 的實際分流漂移,造成「看板顯示與實際行為相反」。
    */
   function classifyDuplicateScenario(order) {
     const all = [order, ...order.relatedOrders.map(r => allOrders.find(o => o.id === r.id) || r)];
-    const codCount    = all.filter(o => isCOD(o.payStatus)).length;
-    const pureUnpaid  = all.filter(o => isUnpaid(o.payStatus) && !isCOD(o.payStatus)).length;
-    const failCount   = all.filter(o => isCardFail(o.payStatus)).length;
-    const succCount   = all.filter(o => isCardSuccess(o.payStatus)).length;
-
-    // 情境 B:全部都是貨到付款 / 超商取貨時付款
-    if (codCount === all.length) return '【B】兩筆皆貨到付款 → 不發信,移交確認中由客服判斷';
-    // 情境 A:全部都是純未付款(線上刷卡尚未付款)
-    if (pureUnpaid === all.length) return '【A】兩筆皆純未付款 → 不發信,移交確認中由客服判斷';
-    // 情境 C:貨到付款 + 刷卡失敗
-    if (codCount >= 1 && failCount >= 1) return '【C】保留貨到付款 → 寄信通知保留筆,刷卡失敗筆只寫備註不發信';
-    // 情境 D:刷卡成功 + 刷卡失敗
-    if (succCount >= 1 && failCount >= 1) return '【D】保留刷卡成功 → 寄信通知保留筆,失敗筆只寫備註不發信';
-    // 情境 E:其他重複未付款狀況 → 預設催繳
-    return '【E】重複未付款 → 未付款筆寄催繳信,其餘只寫備註,全部移交確認中';
+    return judgeDupGroup(all).label;
   }
 
   // ============================================================
@@ -1997,10 +2030,17 @@
         const orderLink = `https://admin.1shop.tw/shop/order/all/${o.id}`;
 
         // ── 狀態色 ──
-        const statusCls = isUnpaid(o.payStatus) ? 'v11-status-unpaid'
-                        : isCOD(o.payStatus) ? 'v11-status-cod'
-                        : isCardFail(o.payStatus) ? 'v11-status-fail'
-                        : 'v11-status-paid';
+        // ★ V11.56:改用新的付款狀態分組。未收錄狀態給獨立顏色,讓它在看板上一眼看得出來
+        const statusCls = !isKnownPayStatus(o) ? 'v11-status-unknown'
+                        : isCOD(o)         ? 'v11-status-cod'
+                        : isPayable(o)     ? 'v11-status-paid'
+                        : isDeadPay(o)     ? 'v11-status-fail'
+                        :                    'v11-status-unpaid';
+
+        // ★ V11.56 未收錄付款狀態的警示標籤(不出貨、不發信,一定要看得見)
+        const payUnknownTag = o.payUnknown
+          ? `<span class="v11-tag" style="background:#c0392b;color:#fff;">⚠️ 付款狀態未收錄,不出貨</span>`
+          : '';
 
         // ── 「老顧客」標籤(同電話 ≥ 2 筆才顯示)──
         const loyalTagHtml = (o.loyaltyCount && o.loyaltyCount >= 2)
@@ -2052,7 +2092,7 @@
         if (o.dupRole === 'KEEP')       extraTags += `<span class="v11-tag" style="background:#27ae60;color:#fff;">✅ 保留(發信通知)</span>`;
         if (o.dupRole === 'CANCEL')     extraTags += `<span class="v11-tag" style="background:#c0392b;color:#fff;">❌ 取消(只備註)</span>`;
         if (o.dupRole === 'PENDING')    extraTags += `<span class="v11-tag" style="background:#f39c12;color:#fff;">⏸ 待客服判斷</span>`;
-        if (o.dupRole === 'UNPAID_DUP') extraTags += `<span class="v11-tag" style="background:#e67e22;color:#fff;">💰 重複未付款</span>`;
+        // ★ V11.56:UNPAID_DUP 角色已退役(沒有任何情境會指派它),標籤一併移除
 
         // ── 移動分頁下拉(若使用者已選擇就保留)──
         const moveTab = o.rowMoveTab || defaultMoveTab;
@@ -2072,6 +2112,7 @@
               <a href="${orderLink}" target="_blank" class="ord-id">${escapeHTML(o.id)}</a>
               <a href="${phoneLink}" target="_blank" class="phone-link">🔍 反查: ${escapeHTML(o.phone || '-')}</a>
               ${webLabelsHtml}
+              ${payUnknownTag}
               ${loyalTagHtml}
               ${extraTags ? `<div>${extraTags}</div>` : ''}
               ${customerNoteHtml}
@@ -2380,7 +2421,7 @@
     if (!subj.trim() && !body.trim()) return null;
 
     // ★ V11.55:卡片編輯框是「預填好」的,不判斷有沒有被改過就永遠算覆寫,
-    //   會把該卡片的文案硬套到區內每一筆(例如 DUP 卡片裡的 UNPAID_DUP 筆該收催繳信卻收到重複單通知)。
+    //   會把該卡片的文案硬套到區內每一筆(例如 DUP 卡片裡不同 dupRole 的筆本該走不同公版)。
     //   → 與存檔公版一字不差時視為「使用者沒動過」,回傳 null 讓 pickEmailTemplate 逐筆決定
     if (type === 'DUP' || type === 'UNPAID') {
       const stored = getStoredTemplate(type === 'UNPAID' ? 'UNPAID' : 'DUP');
@@ -2396,8 +2437,8 @@
   /** 依訂單的 dupRole / type 選對應公版(V11.39 邏輯反轉,★ V11.55 改吃 popup 存檔值)
    *  - DUP + dupRole='KEEP'        → 重複單公版(★ 發信給保留筆客戶,通知「另一筆重複單已取消」)
    *  - DUP + dupRole='CANCEL'      → null(★ 取消筆只寫備註,不發信)
-   *  - DUP + dupRole='UNPAID_DUP'  → 未付款催繳公版(情境 E:整組無成功筆中的未付款那筆)
    *  - DUP + dupRole='PENDING'     → null(不發信,交客服判斷)
+   *  - 付款狀態未收錄(payUnknown)   → null(★ V11.56:狀態不明不聯繫客人)
    *  - UNPAID                       → 未付款催繳公版
    *  - 其他                          → null(不發信)
    */
@@ -2421,10 +2462,12 @@
 
   function pickEmailTemplate(order, type) {
     // ★ V11.55:回傳 null 就是「這筆不該發信」的權威判定,呼叫端不得繞過
+    // ★ V11.56:付款狀態未收錄 → 一律不發信。狀態不明就聯繫客人有風險
+    //   (萬一那個沒見過的狀態其實代表已付款,就是催繳已經付錢的客人)
+    if (order.payUnknown) return null;
     if (type === 'DUP') {
-      if (order.dupRole === 'KEEP')       return getStoredTemplate('DUP');   // ★ 寄給保留筆
-      if (order.dupRole === 'UNPAID_DUP') return getStoredTemplate('UNPAID');
-      return null; // CANCEL / PENDING 不發信
+      if (order.dupRole === 'KEEP') return getStoredTemplate('DUP');   // ★ 寄給保留筆
+      return null; // CANCEL / PENDING 不發信(UNPAID_DUP 角色 V11.56 已退役)
     }
     if (type === 'UNPAID') return getStoredTemplate('UNPAID');
     return null;
