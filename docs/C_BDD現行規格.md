@@ -725,6 +725,29 @@ Scenario: 點擊最終列印按鈕時不搶焦點
   And 在 Chrome 分頁列右側應該多出一個新分頁(背景)
   And 該背景分頁的內容應該是宅配物流單
 
+Scenario Outline: 背景開頁的等待秒數依物流商而定
+  Given 點下最終列印按鈕後,腳本等「背景開頁」事件
+  When 該物流商為 <物流商>
+  Then 等待上限應為 <秒數>
+  And 逾時的訊號應為 <逾時訊號>
+
+  Examples:
+    | 物流商 | 秒數 | 逾時訊號                                  |
+    | 7-11   | 25   | warn ＋ warn toast(預期會走 window.open,沒收到是真失敗) |
+    | 全家   | 25   | warn ＋ warn toast                        |
+    | 宅配   | 3    | 只有一行 log ＋ info toast(已知不走那三條路徑,→ P15) |
+
+  註:宅配仍留 3 秒寬限,不是完全不等 —— 平台哪天改回 window.open 就會被收到並記為成功。
+    這條的目的不是省 22 秒,是別再每輪喊狼來了:一直跳看起來像失敗的警告,
+    會養成忽略警告區的習慣,真正的失敗訊號就被埋掉(紀律 4 的反面)。
+
+Scenario: 勾整頁去印是安全的
+  Given 「已確認」分頁預設不帶日期篩選,列數會遠大於當批筆數(→ A 平台事實 P16)
+  When 印單時勾選整個分頁(實測 21 列)
+  Then 產出的 PDF 只含當批實際拋過的單(實測 7-11 出 6 張＝當批 6 筆)
+  And 不會重印其他日期或已印過的單(→ A 平台事實 P17)
+    註:所以不需要為此改成精準勾選。log 的「未拋過 N 筆」是分頁列數,不是當批筆數
+
 Scenario: 動態等待物流單分頁產生(V11.42 新增)
   Given 7-11 平台網路慢
   When 腳本點擊「7-ELEVEN大宗B2C」最終列印按鈕
@@ -1178,6 +1201,6 @@ Scenario: 升版前手動 checklist
 | Tampermonkey 儀表板顯示對的版本但 Console 還是舊版 | Tampermonkey 快取問題 | 切換腳本「啟用/停用」開關;或 chrome://extensions/ 重新載入 Tampermonkey |
 | 物流單分頁跳到使用者眼前 | GM_openInTab 不可用 | 檢查 @grant 是否有 GM_openInTab;Console 跑 typeof GM_openInTab |
 | 警告 modal 沒被自動關閉 | Modal 結構不符 Killer 的 selector | F12 找出該 modal 的 class 名稱;更新 Modal Killer 的 selector 清單 |
-| 宅配印單沒觸發背景開頁 | 1shop 改用了第 4 種觸發方式 | F12 觀察 click 事件;考慮加路徑 D |
+| 宅配印單沒觸發背景開頁 | **這是已知行為,不是故障**(→ A 平台事實 P15)。V11.58 起宅配只等 3 秒且不再印警告 | 不需排查。若 7-11／全家 出現此警告才要查 |
 | 人工調整移分頁被忽略 | rowMoveTab 沒被儲存到 allOrders | 確認 saveRowInputsToData() 在執行階段 B 前有被呼叫 |
 | 階段 C 切分頁後流程中斷 | localStorage RESUME_FLAG 未生效 | F12 Application 看 localStorage 是否存有 v11_resume_logistics |
