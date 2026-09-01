@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         🔥 1shop 出貨中控台 (V11.58 宅配印單不再假警報)
+// @name         🔥 1shop 出貨中控台 (V11.59 修「掃到自己看板」根因)
 // @namespace    http://tampermonkey.net/
-// @version      11.58.0
-// @description  V11.58 修宅配印單的假警報:宅配的物流單確實會開在新分頁,但不走攔截器的三條路徑(form submit / window.open / a target=_blank),所以每輪都白等 25 秒再印一行「⚠️ 25 秒內沒收到背景開頁事件」。實測已確認那是誤報(A 平台事實 P15)。改為依物流商決定等待秒數:7-11 / 全家 預期走 window.open → 維持 25 秒,逾時升級為 warn(那才是真失敗);宅配已知不走 → 只給 3 秒寬限,逾時只留一行資訊。省 22 秒是附帶效果,主要目的是別再喊狼來了 —— 每輪都跳一個看起來像失敗的警告,久了會養成忽略警告區的習慣,真正的失敗訊號就被埋掉(紀律 4 的反面)。基於 V11.57:看了後台截圖才知道金流欄一格裡有三段(交易管道 + 金流狀態 + 附註),而且同一格可能同時出現兩個狀態字樣(實例「LINE Pay / ● 已付款 1 / 交易成功」)。V11.56 用精準比對,在那種格子上會全部落空 → 每一筆都被判「未收錄」→ 一筆都出不了貨。改為「包含比對 + 固定優先序」:已退款 > 付款失敗/交易逾時/交易取消 > 貨到付款/超商取貨時付款 > 交易成功/已付款 > 等待付款/待確認付款/未付款 > 未收錄。其中「貨到付款必須贏過等待付款」這層保護 V11.55 以前藏在 isUnpaid 的排除條件裡,改成包含比對後必須明確寫回來,否則所有貨到付款單都會被擋著並寄催繳信。另新增第 11 種狀態「已退款」:不出貨、不發信、寫備註移確認中(退款的錢已經還給客人,再寄催繳信是錯的)。判定只認金流狀態,永不比對交易管道(管道是開放清單,分期期數會變動)。基於 V11.56:①【最嚴重】「付款失敗/交易逾時/交易取消」三種狀態原本四個判定式全部落空,classifyOrders 掉到 else → 歸成「可出貨一般單」→ 被自動拋單出貨,也就是把貨寄給沒付錢的人(這三種狀態確實會出現在等待確認分頁)。修法:改用「可出貨白名單」,只有已付款/交易成功/貨到付款/超商取貨時付款算可出貨,其餘一律不出貨;未收錄的新狀態不出貨也不發信,並出聲提示。②判定只比對 .status-name(付款狀態欄還有天數/次數徽章,串接後永遠對不上)。③重複單改為單一情境判定 judgeDupGroup,規則收斂成一條:會成立的付款恰好 1 筆才保留並發信,其餘一切交客服 —— 修掉「兩筆都貨到付款/都刷卡成功卻自動取消一筆並寄信」與「看板顯示與實際行為相反」。④UNPAID_DUP 角色退役。基於 V11.55:①【根因】發信內文框指紋錯誤 —— 平台欄位是 body_code 不是 body,舊指紋永遠抓不到 → 主旨填得進、內文逾時 → 信框跳出來又自己關掉,信沒寄出(A 平台事實 P10)。②【靜默失敗】階段 A 沒接 processNoteForOrder / sendEmailForOrder 的回傳值,備註沒寫、信沒寄都只有 console warn,訂單照樣被移分頁出貨 → 改為失敗進清單、跳 toast、跑完彈 alert,且失敗筆不進階段 B/C。③【公版】popup 存的公版從來沒被讀取,使用者改了沒感覺 → 接上 getStoredTemplate 並拆重複單/未付款兩組;卡片編輯框只在真被改過時才覆寫(舊版永遠預填非空,把「取消筆不發信」閘門整條繞過)。④【死碼】dupRole 的 UNPAID_DUP / PENDING 從未被指派 → 補上實際條件,整組無成功筆時不再硬選 KEEP 寄出「已幫您取消」。基於 V11.54 分批拋印修正::「更多批次功能」按鈕是 1shop「有勾選訂單才由 Vue 渲染」的,V11.52 每批印後取消勾選(按鈕消失),第 2 批重新勾選後 Vue 需時間重繪按鈕,原本一次性 findBtnByText 常抓不到 → 第 2 批拋單/印單靜默跳過(第 1 批成功、第 2 批失敗)。修法:tryThrowAction / doPrintAction 找「更多批次功能」改為 waitFor 等待重試(4 秒),給 Vue 渲染時間。基於 V11.53 商品組合下拉透明統計
+// @version      11.59.0
+// @description  V11.59 修一個藏很久的根因:document.querySelectorAll('tbody tr') 會同時抓到 1shop 的訂單表格「和中控台自己看板的表格」—— 看板每一列也有 <a href=".../shop/order/all/{id}"> 和 checkbox,跟平台列長得一模一樣。2026-08-26 用 51 筆跨頁測出來:拋印每批 50 筆的額度被自家看板列吃掉大半(已確認分頁 85 列 = 平台 34 + 看板 51),第 2 批剩下的 11 筆全是看板列 → 平台端 0 勾選 → 「更多批次功能」按鈕依 P6 不會渲染 → 兩行假警報。這次標籤沒漏印(第 1 批已涵蓋全部 34 張),但真實訂單超過 50 筆時就會變成真的漏印。修法:新增 platformRows() 排除 #v11-overlay 內的列,套用到拋印迴圈、getFreshRowById、全選、取消全選、掃描共 8 處。另修拋印失敗的訊息:舊版把「找不到按鈕(失敗)」印成「⏭ 跳過(已拋過或不適用)」,又把失敗筆算進「共拋 N 筆」;現在三種結果分開講,失敗筆單獨列清單。基於 V11.58:宅配的物流單確實會開在新分頁,但不走攔截器的三條路徑(form submit / window.open / a target=_blank),所以每輪都白等 25 秒再印一行「⚠️ 25 秒內沒收到背景開頁事件」。實測已確認那是誤報(A 平台事實 P15)。改為依物流商決定等待秒數:7-11 / 全家 預期走 window.open → 維持 25 秒,逾時升級為 warn(那才是真失敗);宅配已知不走 → 只給 3 秒寬限,逾時只留一行資訊。省 22 秒是附帶效果,主要目的是別再喊狼來了 —— 每輪都跳一個看起來像失敗的警告,久了會養成忽略警告區的習慣,真正的失敗訊號就被埋掉(紀律 4 的反面)。基於 V11.57:看了後台截圖才知道金流欄一格裡有三段(交易管道 + 金流狀態 + 附註),而且同一格可能同時出現兩個狀態字樣(實例「LINE Pay / ● 已付款 1 / 交易成功」)。V11.56 用精準比對,在那種格子上會全部落空 → 每一筆都被判「未收錄」→ 一筆都出不了貨。改為「包含比對 + 固定優先序」:已退款 > 付款失敗/交易逾時/交易取消 > 貨到付款/超商取貨時付款 > 交易成功/已付款 > 等待付款/待確認付款/未付款 > 未收錄。其中「貨到付款必須贏過等待付款」這層保護 V11.55 以前藏在 isUnpaid 的排除條件裡,改成包含比對後必須明確寫回來,否則所有貨到付款單都會被擋著並寄催繳信。另新增第 11 種狀態「已退款」:不出貨、不發信、寫備註移確認中(退款的錢已經還給客人,再寄催繳信是錯的)。判定只認金流狀態,永不比對交易管道(管道是開放清單,分期期數會變動)。基於 V11.56:①【最嚴重】「付款失敗/交易逾時/交易取消」三種狀態原本四個判定式全部落空,classifyOrders 掉到 else → 歸成「可出貨一般單」→ 被自動拋單出貨,也就是把貨寄給沒付錢的人(這三種狀態確實會出現在等待確認分頁)。修法:改用「可出貨白名單」,只有已付款/交易成功/貨到付款/超商取貨時付款算可出貨,其餘一律不出貨;未收錄的新狀態不出貨也不發信,並出聲提示。②判定只比對 .status-name(付款狀態欄還有天數/次數徽章,串接後永遠對不上)。③重複單改為單一情境判定 judgeDupGroup,規則收斂成一條:會成立的付款恰好 1 筆才保留並發信,其餘一切交客服 —— 修掉「兩筆都貨到付款/都刷卡成功卻自動取消一筆並寄信」與「看板顯示與實際行為相反」。④UNPAID_DUP 角色退役。基於 V11.55:①【根因】發信內文框指紋錯誤 —— 平台欄位是 body_code 不是 body,舊指紋永遠抓不到 → 主旨填得進、內文逾時 → 信框跳出來又自己關掉,信沒寄出(A 平台事實 P10)。②【靜默失敗】階段 A 沒接 processNoteForOrder / sendEmailForOrder 的回傳值,備註沒寫、信沒寄都只有 console warn,訂單照樣被移分頁出貨 → 改為失敗進清單、跳 toast、跑完彈 alert,且失敗筆不進階段 B/C。③【公版】popup 存的公版從來沒被讀取,使用者改了沒感覺 → 接上 getStoredTemplate 並拆重複單/未付款兩組;卡片編輯框只在真被改過時才覆寫(舊版永遠預填非空,把「取消筆不發信」閘門整條繞過)。④【死碼】dupRole 的 UNPAID_DUP / PENDING 從未被指派 → 補上實際條件,整組無成功筆時不再硬選 KEEP 寄出「已幫您取消」。基於 V11.54 分批拋印修正::「更多批次功能」按鈕是 1shop「有勾選訂單才由 Vue 渲染」的,V11.52 每批印後取消勾選(按鈕消失),第 2 批重新勾選後 Vue 需時間重繪按鈕,原本一次性 findBtnByText 常抓不到 → 第 2 批拋單/印單靜默跳過(第 1 批成功、第 2 批失敗)。修法:tryThrowAction / doPrintAction 找「更多批次功能」改為 waitFor 等待重試(4 秒),給 Vue 渲染時間。基於 V11.53 商品組合下拉透明統計
 // @author       Tina + Claude
 // @match        *://admin.1shop.tw/*
 // @run-at       document-idle
@@ -19,7 +19,7 @@
   // ============================================================
   //  ⓪ 全域常數 / 設定
   // ============================================================
-  const VERSION = 'V11.58';
+  const VERSION = 'V11.59';
   const LS = {
     PRE_KWS: 'v11_preorder_kws',          // 預購關鍵字
     SCAN_PAGES: 'v11_scan_pages',         // 深潛頁數
@@ -443,6 +443,34 @@
   function isCOD(order)         { return payGroup(order) === 'cod'; }
 
   /** 從 1shop 列表行抓出訂單編號 */
+  // ══════════════════════════════════════════════════════════
+  //  ★ V11.59 只取「1shop 平台的訂單列」,排除中控台自己看板的列
+  //
+  //  根因:看板的每一列也有 <a href=".../shop/order/all/{id}"> 和 checkbox,
+  //  跟平台的訂單列長得一模一樣,所以 document.querySelectorAll('tbody tr')
+  //  會把我們自己的 UI 也當成訂單掃進去。
+  //
+  //  2026-08-26 用 51 筆跨頁測出來的後果:
+  //    已確認分頁 85 列 = 平台真實 34 列 + 看板 51 列
+  //    處理中分頁 63 列 = 平台真實 12 列 + 看板 51 列
+  //    → 拋印每批 50 筆的額度被自家看板列吃掉大半
+  //    → 第 2 批剩下的 11 筆全是看板列 → 平台端 0 勾選
+  //    → 「更多批次功能」按鈕依 P6(有勾選才渲染)根本不會出現 → 兩行假警報
+  //
+  //  那次標籤沒漏印(第 1 批的 50 列已涵蓋全部 34 筆超商單),
+  //  但**真實訂單超過 50 筆時,就會變成真的漏印** —— 這才是它危險的地方。
+  //  這個 bug 在小樣本下永遠不會現形(單批就結束),撐到 51 筆才被 T1 抓到。
+  // ══════════════════════════════════════════════════════════
+  function platformRows() {
+    return $$('tbody tr').filter(tr => !tr.closest('#v11-overlay') && !tr.closest('.v11-table'));
+  }
+  /** 平台列裡「已勾選」的 checkbox(同樣排除自家看板)*/
+  function platformCheckedBoxes() {
+    return platformRows()
+      .map(tr => tr.querySelector('input[type="checkbox"]:checked'))
+      .filter(Boolean);
+  }
+
   function getOrderIdFromRow(tr) {
     const a = tr.querySelector('a[href*="/shop/order/all/"]');
     if (!a) return '';
@@ -451,7 +479,7 @@
 
   /** Vue 重渲染後重新對焦該訂單列(關鍵防護)*/
   function getFreshRowById(orderId) {
-    return $$('tbody tr').find(r => getOrderIdFromRow(r) === orderId);
+    return platformRows().find(r => getOrderIdFromRow(r) === orderId);   // ★ V11.59
   }
 
   /** 提取 tooltip 備註(hover 觸發)*/
@@ -1228,7 +1256,9 @@ ${lines}
    *  td[4]=商品 / td[5]=付款 / td[6]=物流 / td[7]=金額 / td[8]=備註圖示 / td[9]=操作
    */
   function scrapeCurrentPage(preKws, pageNum = 1) {
-    const rows = $$('tbody tr').filter(r => r.querySelector('a[href*="/shop/order/all/"]'));
+    // ★ V11.59:排除自家看板列。舊版重新掃描時,上一輪的看板還在 DOM 裡,
+    //   理論上會把看板列當成訂單重複計算(實測未發生,但同一個根因,一併修掉)
+    const rows = platformRows().filter(r => r.querySelector('a[href*="/shop/order/all/"]'));
     return rows.map(tr => {
       const tds = $$('td', tr);
 
@@ -1466,12 +1496,12 @@ ${lines}
     if (masterCb && masterCb.getBoundingClientRect().width > 0) {
       masterCb.click();
       await sleep(800);
-      const checkedNow = document.querySelectorAll('tbody tr input[type="checkbox"]:checked').length;
+      const checkedNow = platformCheckedBoxes().length;   // ★ V11.59
       log(`[全選] 用 thead 全選,已勾選 ${checkedNow} 筆`);
       return checkedNow;
     }
     // 方法 2:逐筆勾選 tbody 內所有 cb
-    const rows = document.querySelectorAll('tbody tr');
+    const rows = platformRows();   // ★ V11.59
     let n = 0;
     for (const tr of rows) {
       const cb = tr.querySelector('input[type="checkbox"]');
@@ -3227,7 +3257,7 @@ ${lines}`);
   function uncheckAllRows() {
     // ★ V11.51:不靠 thead 全選來取消(thead 只影響前 50 筆,會留殘留勾選)
     //   直接逐筆取消所有已勾選的 checkbox,確保清乾淨
-    $$('tbody tr input[type="checkbox"]:checked').forEach(cb => cb.click());
+    platformCheckedBoxes().forEach(cb => cb.click());   // ★ V11.59
   }
 
   // ============================================================
@@ -3522,13 +3552,14 @@ ${lines}`);
     const MAX_ROUNDS = 60;           // 防呆:最多 60 輪
     let roundCount = 0;
     let pageCount = 1;
-    const thrownIds = new Set();     // ★ V11.49:記住這輪已拋過的訂單 id
+    const thrownIds = new Set();     // ★ V11.49:記住這輪已處理過的訂單 id(成敗都記,避免無限重試同一批)
+    const failedIds = new Set();     // ★ V11.59:其中「拋單與印單都沒執行到」的,不可算進成功數(→ E 檔 T25)
 
     while (roundCount < MAX_ROUNDS) {
       roundCount++;
 
       // 3-1) 重新抓當前所有列(拋單後頁面會重整,每輪都要重抓)
-      const rows = Array.from(document.querySelectorAll('tbody tr'));
+      const rows = platformRows();   // ★ V11.59 這裡是 T23 的正解
       if (rows.length === 0) {
         log(`[${cfg.label}] 當前頁無訂單,結束`);
         break;
@@ -3562,7 +3593,7 @@ ${lines}`);
       //   原因:單次逐筆點 :checked 常清不乾淨(實測 50 筆只清掉 20),殘留會被下批印單重印。
       //   有了 3-7b 的印後精準取消,這裡通常已乾淨,但保留重試作為雙保險。
       for (let clr = 0; clr < 3; clr++) {
-        const leftover = $$('tbody tr input[type="checkbox"]:checked');
+        const leftover = platformCheckedBoxes();   // ★ V11.59
         if (leftover.length === 0) break;
         if (clr === 0) log(`[${cfg.label}] 清除殘留勾選 ${leftover.length} 筆`);
         leftover.forEach(cb => cb.click());
@@ -3591,16 +3622,30 @@ ${lines}`);
         break;
       }
 
-      // 3-5) 拋單(找不到拋單按鈕代表已拋過,自動跳過)
-      const throwOK = await tryThrowAction(cfg);
-      log(`[${cfg.label}] 本批拋單階段 ${throwOK ? '✅' : '⏭ 跳過(已拋過或不適用)'}`);
+      // 3-5) 拋單
+      //   ★ V11.59:三種結果分開講。舊版把「找不到更多批次功能按鈕」(失敗)
+      //   和「這批沒有可拋的單」(正常)都印成「⏭ 跳過(已拋過或不適用)」,
+      //   於是真正的失敗長得像正常跳過 —— 紀律 4 的反面:出聲了,但聲音講的內容是錯的
+      const throwCode = await tryThrowAction(cfg);
+      if (throwCode === 'ok') {
+        log(`[${cfg.label}] 本批拋單階段 ✅`);
+      } else if (throwCode === 'no-throw-btn') {
+        log(`[${cfg.label}] 本批拋單階段 ⏭ 這批沒有可拋的單(已拋過或不適用)`);
+      } else {
+        warn(`[${cfg.label}] 本批拋單階段 ❌ 找不到「更多批次功能」按鈕 —— 這批 ${batchIds.length} 筆沒有拋到單`);
+      }
       await sleep(800);
 
       // 3-6) 印單
-      await doPrintAction(cfg);
+      const printOK = await doPrintAction(cfg);
 
-      // 3-7) ★ V11.49:把這批加入已拋 Set(不論拋單成敗都記,避免重複嘗試)
+      // 3-7) 把這批加入已處理 Set(不論成敗都記,避免無限重試同一批)
       batchIds.forEach(id => thrownIds.add(id));
+      // ★ V11.59:拋單與印單「都」沒執行到 → 這批是真的失敗,單獨記下來不算進成功數
+      if (throwCode === 'no-batch-btn' && !printOK) {
+        batchIds.forEach(id => failedIds.add(id));
+        warn(`[${cfg.label}] 本批 ${batchIds.length} 筆拋單與印單都沒執行到,已記入失敗清單`);
+      }
 
       // 3-7b) ★ V11.52:印單後,用 batchIds 精準取消「這批」的勾選
       //   根因:拋單/印單完成後,這批訂單仍是勾選狀態(1shop 不會自動取消),
@@ -3609,7 +3654,7 @@ ${lines}`);
       //         印單後 1shop 頁面可能重整,對不到的列就略過(下一批掃描時 thrownIds 也會排除,雙保險)。
       const batchIdSet = new Set(batchIds);
       let uncheckedThisBatch = 0;
-      for (const tr of $$('tbody tr')) {
+      for (const tr of platformRows()) {   // ★ V11.59
         const id = getOrderIdFromRow(tr);
         if (!id || !batchIdSet.has(id)) continue;
         const cb = tr.querySelector('input[type="checkbox"]');
@@ -3632,13 +3677,25 @@ ${lines}`);
       }
     }
 
-    toast(`✅ ${cfg.label} 跨頁拋印完成(共拋 ${thrownIds.size} 筆)`, 'success', 3000);
-    log(`[${cfg.label}] 跨頁拋印完成,共拋 ${thrownIds.size} 筆`);
+    // ★ V11.59:失敗筆不算進「共拋 N 筆」,並把訂單編號列出來讓人能手動補
+    const okCount = thrownIds.size - failedIds.size;
+    if (failedIds.size > 0) {
+      warn(`[${cfg.label}] 跨頁拋印結束:成功 ${okCount} 筆,失敗 ${failedIds.size} 筆(拋單與印單都沒執行到)`);
+      warn(`[${cfg.label}] 失敗清單:${[...failedIds].join(', ')}`);
+      toast(`⚠️ ${cfg.label} ${failedIds.size} 筆沒拋印成功,請確認標籤張數`, 'warn', 6000);
+    } else {
+      toast(`✅ ${cfg.label} 跨頁拋印完成(共拋 ${okCount} 筆)`, 'success', 3000);
+      log(`[${cfg.label}] 跨頁拋印完成,共拋 ${okCount} 筆`);
+    }
   }
 
   /** 拋單階段:點「更多批次功能」→ 點該物流的拋單按鈕 → (宅配)確認 → 關閉結果
    *  ★ V11.39:用 cfg.throwBtnText 嚴格 AND 匹配,絕不會點到別家物流的拋單按鈕
-   *  若找不到拋單按鈕,代表訂單已拋過,回傳 false,讓上層繼續做印單 */
+   *  ★ V11.59 回傳「原因碼」而非 boolean(→ E 檔 T25):
+   *    'ok'           拋單流程跑完
+   *    'no-throw-btn' 找到「更多批次功能」但這批沒有可拋的單(已拋過或不適用)—— 正常情況
+   *    'no-batch-btn' 連「更多批次功能」都找不到 —— 這是失敗,不是跳過
+   *  舊版兩種 false 都被上層印成「⏭ 跳過(已拋過或不適用)」,把失敗說成正常 */
   async function tryThrowAction(cfg) {
     // ★ V11.54:「更多批次功能」按鈕是「有勾選才由 Vue 渲染」的。
     //   第 2 批開始時,V11.52 剛取消前批勾選(按鈕消失),重新勾選這批後 Vue 需要時間重繪按鈕,
@@ -3646,7 +3703,7 @@ ${lines}`);
     const moreBtn = await waitFor(() => findBtnByText('更多批次'), 4000);
     if (!moreBtn) {
       warn(`[${cfg.label}] 找不到「更多批次功能」按鈕(拋單階段,已等待重試)`);
-      return false;
+      return 'no-batch-btn';   // ★ V11.59:這是失敗
     }
     log(`[${cfg.label}] 點「更多批次功能」(拋單)`);
     moreBtn.click();
@@ -3658,7 +3715,7 @@ ${lines}`);
       log(`[${cfg.label}] ⏭ 找不到拋單按鈕「${cfg.throwBtnText.join('+')}」於「${cfg.provider}」section(可能已拋過)`);
       forceCloseAllModals();
       await sleep(500);
-      return false;
+      return 'no-throw-btn';   // ★ V11.59:這是正常情況,不是失敗
     }
     log(`[${cfg.label}] 點拋單按鈕「${throwBtn.textContent.trim()}」`);
     throwBtn.click();
@@ -3702,7 +3759,7 @@ ${lines}`);
       forceCloseAllModals();
       await sleep(500);
     }
-    return true;
+    return 'ok';   // ★ V11.59
   }
 
   /** 印單階段:點「更多批次功能」→ 點該物流的印單按鈕 → 點最終列印按鈕(觸發 PDF)
