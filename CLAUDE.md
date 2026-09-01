@@ -26,10 +26,10 @@
 | 主要腳本 | `src/1shop_ultimate.user.js` |
 | 執行方式 | Tampermonkey 以 `@require file://` 載入上述檔案，**存檔即生效，不需貼回 Tampermonkey**。stub 見 `tampermonkey_stub.user.js` |
 | 版號權威 | `src/1shop_ultimate.user.js` 內的 `const VERSION` ＋ Metadata（要同步哪幾個見閘門 3）。stub 的 `@version` 固定不動。文件不標「對應版本」 |
-| 版本歷史 / 待修清單 | `docs/E_變更紀錄與待修`（Notion 到位前的權威來源） |
+| 版本歷史 / 待修清單 | `docs/E_變更紀錄與待修`（**工作權威**）。Notion 藍圖頁是呈現層 |
 
-> Notion 藍圖頁尚未開通；期間變更紀錄、待修問題板、連結索引全部收在 **E 變更紀錄與待修**。
-> 外部連結一律經該檔的「連結索引」，不散落在其他 repo 檔案中。Notion 開通後依 `維護藍圖` 決定雙軌或退役（見該檔 T9）。
+> **Claude 讀寫不到 Notion**，所以變更紀錄與待修一律以 E 檔為準；同步**單向 E → Notion**，不反向。
+> 外部連結收在該檔的「連結索引」，不散落在其他 repo 檔案中。
 
 ---
 
