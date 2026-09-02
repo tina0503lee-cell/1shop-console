@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         🔥 1shop 出貨中控台 (V11.59 修「掃到自己看板」根因)
+// @name         🔥 1shop 出貨中控台 (V11.60 重複單保留筆補上拋印 + 收尾對帳)
 // @namespace    http://tampermonkey.net/
-// @version      11.59.0
-// @description  V11.59 修一個藏很久的根因:document.querySelectorAll('tbody tr') 會同時抓到 1shop 的訂單表格「和中控台自己看板的表格」—— 看板每一列也有 <a href=".../shop/order/all/{id}"> 和 checkbox,跟平台列長得一模一樣。2026-08-26 用 51 筆跨頁測出來:拋印每批 50 筆的額度被自家看板列吃掉大半(已確認分頁 85 列 = 平台 34 + 看板 51),第 2 批剩下的 11 筆全是看板列 → 平台端 0 勾選 → 「更多批次功能」按鈕依 P6 不會渲染 → 兩行假警報。這次標籤沒漏印(第 1 批已涵蓋全部 34 張),但真實訂單超過 50 筆時就會變成真的漏印。修法:新增 platformRows() 排除 #v11-overlay 內的列,套用到拋印迴圈、getFreshRowById、全選、取消全選、掃描共 8 處。另修拋印失敗的訊息:舊版把「找不到按鈕(失敗)」印成「⏭ 跳過(已拋過或不適用)」,又把失敗筆算進「共拋 N 筆」;現在三種結果分開講,失敗筆單獨列清單。基於 V11.58:宅配的物流單確實會開在新分頁,但不走攔截器的三條路徑(form submit / window.open / a target=_blank),所以每輪都白等 25 秒再印一行「⚠️ 25 秒內沒收到背景開頁事件」。實測已確認那是誤報(A 平台事實 P15)。改為依物流商決定等待秒數:7-11 / 全家 預期走 window.open → 維持 25 秒,逾時升級為 warn(那才是真失敗);宅配已知不走 → 只給 3 秒寬限,逾時只留一行資訊。省 22 秒是附帶效果,主要目的是別再喊狼來了 —— 每輪都跳一個看起來像失敗的警告,久了會養成忽略警告區的習慣,真正的失敗訊號就被埋掉(紀律 4 的反面)。基於 V11.57:看了後台截圖才知道金流欄一格裡有三段(交易管道 + 金流狀態 + 附註),而且同一格可能同時出現兩個狀態字樣(實例「LINE Pay / ● 已付款 1 / 交易成功」)。V11.56 用精準比對,在那種格子上會全部落空 → 每一筆都被判「未收錄」→ 一筆都出不了貨。改為「包含比對 + 固定優先序」:已退款 > 付款失敗/交易逾時/交易取消 > 貨到付款/超商取貨時付款 > 交易成功/已付款 > 等待付款/待確認付款/未付款 > 未收錄。其中「貨到付款必須贏過等待付款」這層保護 V11.55 以前藏在 isUnpaid 的排除條件裡,改成包含比對後必須明確寫回來,否則所有貨到付款單都會被擋著並寄催繳信。另新增第 11 種狀態「已退款」:不出貨、不發信、寫備註移確認中(退款的錢已經還給客人,再寄催繳信是錯的)。判定只認金流狀態,永不比對交易管道(管道是開放清單,分期期數會變動)。基於 V11.56:①【最嚴重】「付款失敗/交易逾時/交易取消」三種狀態原本四個判定式全部落空,classifyOrders 掉到 else → 歸成「可出貨一般單」→ 被自動拋單出貨,也就是把貨寄給沒付錢的人(這三種狀態確實會出現在等待確認分頁)。修法:改用「可出貨白名單」,只有已付款/交易成功/貨到付款/超商取貨時付款算可出貨,其餘一律不出貨;未收錄的新狀態不出貨也不發信,並出聲提示。②判定只比對 .status-name(付款狀態欄還有天數/次數徽章,串接後永遠對不上)。③重複單改為單一情境判定 judgeDupGroup,規則收斂成一條:會成立的付款恰好 1 筆才保留並發信,其餘一切交客服 —— 修掉「兩筆都貨到付款/都刷卡成功卻自動取消一筆並寄信」與「看板顯示與實際行為相反」。④UNPAID_DUP 角色退役。基於 V11.55:①【根因】發信內文框指紋錯誤 —— 平台欄位是 body_code 不是 body,舊指紋永遠抓不到 → 主旨填得進、內文逾時 → 信框跳出來又自己關掉,信沒寄出(A 平台事實 P10)。②【靜默失敗】階段 A 沒接 processNoteForOrder / sendEmailForOrder 的回傳值,備註沒寫、信沒寄都只有 console warn,訂單照樣被移分頁出貨 → 改為失敗進清單、跳 toast、跑完彈 alert,且失敗筆不進階段 B/C。③【公版】popup 存的公版從來沒被讀取,使用者改了沒感覺 → 接上 getStoredTemplate 並拆重複單/未付款兩組;卡片編輯框只在真被改過時才覆寫(舊版永遠預填非空,把「取消筆不發信」閘門整條繞過)。④【死碼】dupRole 的 UNPAID_DUP / PENDING 從未被指派 → 補上實際條件,整組無成功筆時不再硬選 KEEP 寄出「已幫您取消」。基於 V11.54 分批拋印修正::「更多批次功能」按鈕是 1shop「有勾選訂單才由 Vue 渲染」的,V11.52 每批印後取消勾選(按鈕消失),第 2 批重新勾選後 Vue 需時間重繪按鈕,原本一次性 findBtnByText 常抓不到 → 第 2 批拋單/印單靜默跳過(第 1 批成功、第 2 批失敗)。修法:tryThrowAction / doPrintAction 找「更多批次功能」改為 waitFor 等待重試(4 秒),給 Vue 渲染時間。基於 V11.53 商品組合下拉透明統計
+// @version      11.60.0
+// @description  V11.60 修「重複單保留筆不會被拋單印標籤」:V11.39 把保留筆分到階段 C-1,只點「當天出貨」按鈕就結束,註解明寫「不拋印」。這個前提是錯的 —— 保留筆是今天真的要出的訂單,跟一般單一樣需要物流單號與標籤(2026-09-01 Tina 定版)。它以前看起來沒問題,是因為拋印迴圈是「分頁上有什麼列就勾什麼」(不照名單勾),保留筆若是超商會跟 NORMAL 超商單躺在同一個「已確認」分頁被順便掃走 —— 靠巧合不是設計。2026-09-01 踩到反例:5 筆出貨單中保留筆是宅配、NORMAL 一筆宅配都沒有 → runLogisticsByGroup 的 group 由 NORMAL 名單算出 → 宅配那條腿 group.length===0 → 整段跳過 → 那筆分流到「處理中」分頁後沒拋單沒標籤,貨出不去,而且只印一行資訊級「無訂單,跳過」,看 log 的人不會發現(紀律 4 的反面)。修法三件事:①階段 C-1／C-2 合併,保留筆併入同一份名單一起跑 runLogisticsByGroup(它第一步就是 autoSplitForToday,分流行為完全不變,差別只在後面不再中斷),進入條件從「NORMAL>0」改為「合計>0」以免只有保留筆時整段又被跳過。②新增收尾對帳:processOneCarrier 改為回傳實際處理到的訂單 id,runLogisticsByGroup 跑完比對「該拋的」與「實際拋到的」,有差額就 warn+toast+alert 並列出訂單編號 —— ①只堵住這一種組合,②才是通用防線,以後不管什麼原因漏拋都會被抓出來;另外會單獨點名「物流欄三家都對不上」的單。③「無訂單,跳過」改寫成「本輪出貨名單中無此物流」,講清楚判斷依據 —— 舊訊息會被讀成「平台上沒這家的單」。基於 V11.59 修一個藏很久的根因:document.querySelectorAll('tbody tr') 會同時抓到 1shop 的訂單表格「和中控台自己看板的表格」—— 看板每一列也有 <a href=".../shop/order/all/{id}"> 和 checkbox,跟平台列長得一模一樣。2026-08-26 用 51 筆跨頁測出來:拋印每批 50 筆的額度被自家看板列吃掉大半(已確認分頁 85 列 = 平台 34 + 看板 51),第 2 批剩下的 11 筆全是看板列 → 平台端 0 勾選 → 「更多批次功能」按鈕依 P6 不會渲染 → 兩行假警報。這次標籤沒漏印(第 1 批已涵蓋全部 34 張),但真實訂單超過 50 筆時就會變成真的漏印。修法:新增 platformRows() 排除 #v11-overlay 內的列,套用到拋印迴圈、getFreshRowById、全選、取消全選、掃描共 8 處。另修拋印失敗的訊息:舊版把「找不到按鈕(失敗)」印成「⏭ 跳過(已拋過或不適用)」,又把失敗筆算進「共拋 N 筆」;現在三種結果分開講,失敗筆單獨列清單。基於 V11.58:宅配的物流單確實會開在新分頁,但不走攔截器的三條路徑(form submit / window.open / a target=_blank),所以每輪都白等 25 秒再印一行「⚠️ 25 秒內沒收到背景開頁事件」。實測已確認那是誤報(A 平台事實 P15)。改為依物流商決定等待秒數:7-11 / 全家 預期走 window.open → 維持 25 秒,逾時升級為 warn(那才是真失敗);宅配已知不走 → 只給 3 秒寬限,逾時只留一行資訊。省 22 秒是附帶效果,主要目的是別再喊狼來了 —— 每輪都跳一個看起來像失敗的警告,久了會養成忽略警告區的習慣,真正的失敗訊號就被埋掉(紀律 4 的反面)。基於 V11.57:看了後台截圖才知道金流欄一格裡有三段(交易管道 + 金流狀態 + 附註),而且同一格可能同時出現兩個狀態字樣(實例「LINE Pay / ● 已付款 1 / 交易成功」)。V11.56 用精準比對,在那種格子上會全部落空 → 每一筆都被判「未收錄」→ 一筆都出不了貨。改為「包含比對 + 固定優先序」:已退款 > 付款失敗/交易逾時/交易取消 > 貨到付款/超商取貨時付款 > 交易成功/已付款 > 等待付款/待確認付款/未付款 > 未收錄。其中「貨到付款必須贏過等待付款」這層保護 V11.55 以前藏在 isUnpaid 的排除條件裡,改成包含比對後必須明確寫回來,否則所有貨到付款單都會被擋著並寄催繳信。另新增第 11 種狀態「已退款」:不出貨、不發信、寫備註移確認中(退款的錢已經還給客人,再寄催繳信是錯的)。判定只認金流狀態,永不比對交易管道(管道是開放清單,分期期數會變動)。基於 V11.56:①【最嚴重】「付款失敗/交易逾時/交易取消」三種狀態原本四個判定式全部落空,classifyOrders 掉到 else → 歸成「可出貨一般單」→ 被自動拋單出貨,也就是把貨寄給沒付錢的人(這三種狀態確實會出現在等待確認分頁)。修法:改用「可出貨白名單」,只有已付款/交易成功/貨到付款/超商取貨時付款算可出貨,其餘一律不出貨;未收錄的新狀態不出貨也不發信,並出聲提示。②判定只比對 .status-name(付款狀態欄還有天數/次數徽章,串接後永遠對不上)。③重複單改為單一情境判定 judgeDupGroup,規則收斂成一條:會成立的付款恰好 1 筆才保留並發信,其餘一切交客服 —— 修掉「兩筆都貨到付款/都刷卡成功卻自動取消一筆並寄信」與「看板顯示與實際行為相反」。④UNPAID_DUP 角色退役。基於 V11.55:①【根因】發信內文框指紋錯誤 —— 平台欄位是 body_code 不是 body,舊指紋永遠抓不到 → 主旨填得進、內文逾時 → 信框跳出來又自己關掉,信沒寄出(A 平台事實 P10)。②【靜默失敗】階段 A 沒接 processNoteForOrder / sendEmailForOrder 的回傳值,備註沒寫、信沒寄都只有 console warn,訂單照樣被移分頁出貨 → 改為失敗進清單、跳 toast、跑完彈 alert,且失敗筆不進階段 B/C。③【公版】popup 存的公版從來沒被讀取,使用者改了沒感覺 → 接上 getStoredTemplate 並拆重複單/未付款兩組;卡片編輯框只在真被改過時才覆寫(舊版永遠預填非空,把「取消筆不發信」閘門整條繞過)。④【死碼】dupRole 的 UNPAID_DUP / PENDING 從未被指派 → 補上實際條件,整組無成功筆時不再硬選 KEEP 寄出「已幫您取消」。基於 V11.54 分批拋印修正::「更多批次功能」按鈕是 1shop「有勾選訂單才由 Vue 渲染」的,V11.52 每批印後取消勾選(按鈕消失),第 2 批重新勾選後 Vue 需時間重繪按鈕,原本一次性 findBtnByText 常抓不到 → 第 2 批拋單/印單靜默跳過(第 1 批成功、第 2 批失敗)。修法:tryThrowAction / doPrintAction 找「更多批次功能」改為 waitFor 等待重試(4 秒),給 Vue 渲染時間。基於 V11.53 商品組合下拉透明統計
 // @author       Tina + Claude
 // @match        *://admin.1shop.tw/*
 // @run-at       document-idle
@@ -19,7 +19,7 @@
   // ============================================================
   //  ⓪ 全域常數 / 設定
   // ============================================================
-  const VERSION = 'V11.59';
+  const VERSION = 'V11.60';
   const LS = {
     PRE_KWS: 'v11_preorder_kws',          // 預購關鍵字
     SCAN_PAGES: 'v11_scan_pages',         // 深潛頁數
@@ -2738,26 +2738,32 @@ ${lines}`);
     // ── 階段 B:批次移動分頁 ──
     await batchMoveOrdersByType(cleanByType);
 
-    // ── 階段 C-1:DUP 保留筆「只點當天出貨按鈕」(不拋印、不切分頁)──
+    // ── 階段 C:當日出貨清單「自動分流當天出貨 + 切分頁拋印」(完整流程)──
     // ★ V11.39:重複單保留筆只需要點綠/紅按鈕讓訂單分流到對應分頁,不做後續拋印
+    // ★ V11.60:上面那條 V11.39 的前提已證實是錯的,作廢(→ E 檔 T27)。
+    //   保留筆是「今天真的要出的訂單」,跟一般單一樣需要拋單與標籤(2026-09-01 Tina 定版)。
+    //   V11.39 之所以看起來沒問題,是因為拋印迴圈是「分頁上有什麼列就勾什麼」
+    //   (processOneCarrier 步驟 3-2,不照名單勾),保留筆若是超商,會跟 NORMAL 超商單
+    //   躺在同一個「已確認」分頁被順便掃走 —— 靠的是巧合,不是設計。
+    //   2026-09-01 踩到反例:保留筆是宅配、NORMAL 一筆宅配都沒有 →
+    //   runLogisticsByGroup 的 group 由 NORMAL 名單算出 → 宅配那條腿 group.length === 0 →
+    //   整段跳過 → 那筆分流到「處理中」分頁後就沒人管了,沒拋單沒標籤,
+    //   而且只印一行資訊級「無訂單,跳過」,看 log 的人不會發現(紀律 4 的反面)。
+    //   修法:保留筆併入同一份名單一起跑 runLogisticsByGroup —— 它第一步就是 autoSplitForToday,
+    //   跟原本階段 C-1 做的是同一件事,所以分流行為完全不變,差別只在後面不再中斷。
     const dupKeepOrders = (cleanByType.DUP || []).filter(o => o.dupRole === 'KEEP');
-    if (dupKeepOrders.length > 0) {
-      toast(`🚀 DUP 保留筆 ${dupKeepOrders.length} 筆 → 自動分流當天出貨(僅點按鈕)`, 'info', 2800);
-      log(`[階段 C-1] DUP 保留筆 ${dupKeepOrders.length} 筆,只跑 autoSplitForToday(不拋印、不切分頁)`);
-      await sleep(800);
-      await autoSplitForToday(dupKeepOrders);
-      await sleep(2000);
-    }
-
-    // ── 階段 C-2:NORMAL 區「自動分流當天出貨 + 切分頁拋印」(完整流程)──
-    if (cleanByType.NORMAL && cleanByType.NORMAL.length > 0) {
+    const normalOrders = cleanByType.NORMAL || [];
+    const shipTodayOrders = [...normalOrders, ...dupKeepOrders];   // ★ V11.60
+    // ★ V11.60:進入條件從「NORMAL > 0」改為「合計 > 0」——
+    //   否則某天只有保留筆、沒有任何 NORMAL 單時,整段又會被跳過(同一個坑換個位置)
+    if (shipTodayOrders.length > 0) {
       const card = $('.v11-card[data-type="NORMAL"]');
       const which = (card && $('.v11-logistics-select', card)?.value) || 'all';
       const whichLabel = which === 'all' ? '全部(依物流自動分流)' : which;
-      toast(`🚀 NORMAL 區 ${cleanByType.NORMAL.length} 筆 → 自動分流當天出貨 [${whichLabel}]`, 'info', 2500);
-      log(`[階段 C-2] NORMAL ${cleanByType.NORMAL.length} 筆,跑完整 runLogisticsByGroup(分流+切分頁+拋印)`);
+      toast(`🚀 當日出貨 ${shipTodayOrders.length} 筆(一般 ${normalOrders.length}＋重複單保留 ${dupKeepOrders.length}) → 分流+拋印 [${whichLabel}]`, 'info', 2800);
+      log(`[階段 C] 當日出貨 ${shipTodayOrders.length} 筆(NORMAL ${normalOrders.length} + DUP 保留 ${dupKeepOrders.length}),跑完整 runLogisticsByGroup(分流+切分頁+拋印)`);
       await sleep(800);
-      await runLogisticsByGroup(cleanByType.NORMAL, which);
+      await runLogisticsByGroup(shipTodayOrders, which);
     }
 
     // ── 階段 D:自動點擊原生「更新」按鈕 ──
@@ -3292,11 +3298,23 @@ ${lines}`);
     // ─────────────────────────────────────
     const carriers = which === 'all' ? ['711', 'fami', 'home'] : [which];
 
+    // ★ V11.60:收尾對帳的基準(→ E 檔 T27)。
+    //   inScope   = 這輪該被拋印的單(依 which 縮小範圍,使用者只選一家時不要誤報其他家)
+    //   unmatched = 三家 shipTextMatch 都對不上的單。只有跑「全部」時才算漏 ——
+    //               使用者指定單一物流時,其他家本來就不該處理,不是遺漏
+    //   thrownAll = 實際被拋印處理到的訂單 id(由 processOneCarrier 回報,已扣掉失敗筆)
+    const inScope = orders.filter(o =>
+      carriers.some(k => LOGISTICS[k].shipTextMatch.some(t => (o.shipText || '').includes(t))));
+    const unmatched = which === 'all' ? orders.filter(o => !inScope.includes(o)) : [];
+    const thrownAll = new Set();
+
     for (const key of carriers) {
       const cfg = LOGISTICS[key];
       const group = orders.filter(o => cfg.shipTextMatch.some(k => o.shipText.includes(k)));
       if (group.length === 0) {
-        log(`【${cfg.label}】無訂單,跳過`);
+        // ★ V11.60:講清楚判斷依據。這句說的是「本輪出貨名單裡沒有這家」,
+        //   不是「平台上沒有這家的單」—— 2026-09-01 就是被讀成後者才漏掉一筆宅配(→ E 檔 T27)
+        log(`【${cfg.label}】本輪出貨名單(${orders.length} 筆)中無此物流,跳過`);
         continue;
       }
 
@@ -3334,11 +3352,43 @@ ${lines}`);
 
       // 在分頁印單
       toast(`🚚 ${cfg.label} 印單中(${group.length} 筆)`, 'info', 2000);
-      await processOneCarrier(cfg, group);
+      // ★ V11.60:收回這家實際處理到的 id,供收尾對帳(失敗筆不算,它們沒真的拋出去)
+      const res = await processOneCarrier(cfg, group);
+      if (res && res.thrownIds) {
+        for (const id of res.thrownIds) {
+          if (!res.failedIds || !res.failedIds.has(id)) thrownAll.add(id);
+        }
+      }
 
       // ★ V11.40:不再等 PDF 下載完成(已改用背景分頁),只給短緩衝讓 toast 顯示完
       toast(`📂 ${cfg.label} 物流單已在背景分頁,切換下一家...`, 'info', 1500);
       await sleep(1500);
+    }
+
+    // ★ V11.60:收尾對帳 —— 「該拋的」少了誰一定要出聲(→ E 檔 T27)。
+    //   上面那條 DUP 保留筆的修正只堵住這一種組合;本段是通用防線:
+    //   以後不管什麼原因(名單算錯、分頁沒切到、按鈕沒找到)導致某筆沒被拋印,都會被抓出來。
+    //   註:thrownAll 可能比 inScope 多 —— 已確認分頁預設不帶日期篩選(P16),
+    //   迴圈會把分頁上的舊單一起掃到,但平台只對當批實際拋過的產標籤(P17),所以多不是問題,少才是。
+    const missed = inScope.filter(o => !thrownAll.has(o.id));
+    if (missed.length > 0 || unmatched.length > 0) {
+      const lines = [];
+      if (missed.length > 0) {
+        lines.push(`・沒拋到 ${missed.length} 筆:${missed.map(o => o.id).join(', ')}`);
+      }
+      if (unmatched.length > 0) {
+        lines.push(`・物流無法辨識 ${unmatched.length} 筆(不屬於 7-11／全家／宅配 任一家,整輪都沒被處理):${unmatched.map(o => `${o.id}(物流欄「${o.shipText || '空白'}」)`).join(', ')}`);
+      }
+      warn(`[對帳] 應拋 ${inScope.length + unmatched.length} 筆,實際拋到 ${thrownAll.size} 筆,以下沒被處理:
+${lines.join('\n')}`);
+      toast(`⚠️ 對帳不符:${missed.length + unmatched.length} 筆沒拋印到,請看 console 手動補`, 'warn', 9000);
+      alert(`⚠️ 物流拋印對帳不符
+
+以下訂單「沒有拋單、也沒有標籤」,請手動補:
+
+${lines.join('\n')}`);
+    } else {
+      log(`[對帳] ✔ 本輪應拋 ${inScope.length} 筆全部拋印到(實際處理 ${thrownAll.size} 筆,含分頁上的舊單)`);
     }
 
     Storage.del(LS.RESUME_FLAG);
@@ -3687,6 +3737,11 @@ ${lines}`);
       toast(`✅ ${cfg.label} 跨頁拋印完成(共拋 ${okCount} 筆)`, 'success', 3000);
       log(`[${cfg.label}] 跨頁拋印完成,共拋 ${okCount} 筆`);
     }
+
+    // ★ V11.60:回報給上層做收尾對帳(→ E 檔 T27)。
+    //   以前這個函式什麼都不回傳,上層無從得知「該拋的到底拋到沒有」,
+    //   所以漏拋只能靠人事後數標籤張數才會發現。
+    return { thrownIds, failedIds };
   }
 
   /** 拋單階段:點「更多批次功能」→ 點該物流的拋單按鈕 → (宅配)確認 → 關閉結果
