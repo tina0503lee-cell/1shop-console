@@ -28,7 +28,8 @@
 | 版號權威 | `src/1shop_ultimate.user.js` 內的 `const VERSION` ＋ Metadata（要同步哪幾個見閘門 3）。stub 的 `@version` 固定不動。文件不標「對應版本」 |
 | 版本歷史 / 待修清單 | `docs/E_變更紀錄與待修`（**工作權威**）。Notion 藍圖頁是呈現層 |
 
-> **Claude 讀寫不到 Notion**，所以變更紀錄與待修一律以 E 檔為準；同步**單向 E → Notion**，不反向。
+> **E 檔是工作權威**，因為它在 git 裡、能跟 code 一起 diff 與回溯，Notion 頁沒有版本血統。變更紀錄與待修一律以 E 檔為準。
+> 同步**單向 E → Notion**，不反向；環境掛有 Notion MCP 時可由 AI 直接寫入，**寫前先確認目標頁**（核心紀律 5），沒掛時退回由 Tina 手動整批貼。
 > 外部連結收在該檔的「連結索引」，不散落在其他 repo 檔案中。
 
 ---
