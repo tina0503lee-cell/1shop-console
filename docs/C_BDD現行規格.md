@@ -620,6 +620,26 @@ Scenario: 真正最後一頁才停止
   Then 應該正確回傳 null(父 li disabled 是真的沒下一頁)
   And processOneCarrier 顯示「已是最後一頁,結束跨頁處理」
 
+Scenario Outline: 翻不了頁時要分清楚「正常結束」還是「結構變了」
+  Given findNextPageBtn 回傳 null
+  And 原因為 <原因>
+  When 掃描的深潛迴圈收到 null
+  Then 訊號等級應為 <等級>
+  And <是否印 HTML>
+
+  Examples:
+    | 原因                          | 等級                    | 是否印 HTML          |
+    | disabled(下一頁被標成停用)    | log ＋ info toast       | 不印                 |
+    | not-found(認不出下一頁按鈕)   | warn ＋ warn toast      | 印出分頁列實際 HTML  |
+
+  註:★ V11.61。舊版 findNextPageBtn 兩種情況都只回 null,呼叫端無從分辨,
+    於是**每一輪正常掃完**都印一行「⚠️ 找不到下一頁按鈕,終止深潛」再加 800 字 HTML dump ——
+    即使上一行才剛印過「父 li 有 .disabled,已是最後一頁」。
+    這跟 T17（宅配假警報）是同一個病:正常狀況每輪喊一次警告,
+    久了「本輪有沒有 warn」就變得無法一眼判讀,警告區必須乾淨到
+    「有東西出現就是真的有事」(→ E 檔 T24 ②)。
+    做法是新增 lastNextPageReason 記錄回傳 null 的原因,不動翻頁判斷本身。
+
 Scenario: 切回第 1 頁也用 offsetParent
   Given processOneCarrier 開始時要切回第 1 頁
   When findFirstPageBtn 找 angles-left 按鈕
@@ -813,14 +833,36 @@ Scenario Outline: 背景開頁的等待秒數依物流商而定
   And 逾時的訊號應為 <逾時訊號>
 
   Examples:
-    | 物流商 | 秒數 | 逾時訊號                                  |
-    | 7-11   | 25   | warn ＋ warn toast(預期會走 window.open,沒收到是真失敗) |
-    | 全家   | 25   | warn ＋ warn toast                        |
-    | 宅配   | 3    | 只有一行 log ＋ info toast(已知不走那三條路徑,→ P15) |
+    | 物流商 | 秒數        | 逾時訊號                                  |
+    | 7-11   | 依筆數(見下) | warn ＋ warn toast(預期會走 window.open,沒收到是真失敗) |
+    | 全家   | 依筆數(見下) | warn ＋ warn toast                        |
+    | 宅配   | 3           | 只有一行 log ＋ info toast(已知不走那三條路徑,→ P15) |
 
   註:宅配仍留 3 秒寬限,不是完全不等 —— 平台哪天改回 window.open 就會被收到並記為成功。
     這條的目的不是省 22 秒,是別再每輪喊狼來了:一直跳看起來像失敗的警告,
     會養成忽略警告區的習慣,真正的失敗訊號就被埋掉(紀律 4 的反面)。
+
+Scenario Outline: 預期走 window.open 的物流商,等待上限跟著本批筆數放大
+  Given 該物流商的 bgTabExpected 不為 false(7-11／全家)
+  And 本批筆數為 <筆數>
+  When 計算背景開頁的等待上限
+  Then 應為 <上限秒數>
+  And Console log 應顯示「背景開頁等待上限 <上限秒數> 秒(本批 <筆數> 筆)」
+
+  Examples:
+    | 筆數 | 上限秒數 | 說明                                  |
+    | 4    | 25       | 下限,與 V11.60 以前完全相同           |
+    | 9    | 25       | 下限,與 V11.60 以前完全相同           |
+    | 50   | 45       | 對實測 24.7 秒有 20 秒餘裕            |
+    | 100  | 80       | 10 + 100 x 0.7                        |
+    | 200  | 90       | 觸天花板                              |
+
+  註:★ V11.61。公式 min(90 秒, max(25 秒, 10 秒 + 筆數 x 0.7 秒))。
+    起因是耗時隨筆數長、上限卻寫死:7-11 同一條路徑實測 4 筆 3.0 秒、4 筆 3.8 秒、
+    9 筆 7.8 秒、50 筆 24.7 秒 —— 50 筆離 25 秒只剩 0.3 秒,再慢一點就會印出
+    「沒收到背景開頁事件」但標籤其實有產生,假警報又長回來(→ E 檔 T24)。
+    下限釘 25 秒是刻意的:日常小量的行為與舊版一字不差,零回歸風險。
+    天花板 90 秒是防呆,真的掛掉時不要無限等下去。
 
 Scenario: 某物流商本輪出貨名單中 0 筆時整段跳過
   Given 本輪出貨名單中某物流商(例如全家)一筆都沒有
