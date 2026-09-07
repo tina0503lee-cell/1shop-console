@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         🔥 1shop 出貨中控台 (V11.61 背景開頁等待上限跟著筆數放大 + 翻頁訊息分級)
+// @name         🔥 1shop 出貨中控台 (V11.62 階段 B／分流改跨頁 + 拋印批次降到 12)
 // @namespace    http://tampermonkey.net/
-// @version      11.61.0
-// @description  V11.61 兩件事,都是「別讓正常狀況長得像失敗」(紀律 4)。①背景開頁的等待上限舊版對所有批次寫死 25 秒,但耗時是隨筆數長的 —— 7-11 同一條路徑實測 4 筆 3.0 秒、4 筆 3.8 秒、9 筆 7.8 秒、50 筆 24.7 秒,50 筆離逾時只剩 0.3 秒。再慢一點就會印出「25 秒內沒收到背景開頁事件」,但標籤其實有產生,那正是 V11.58 花力氣消掉的假警報又長回來,而且是在最需要相信警告的大量出貨場合。改為 doPrintAction 多收 batchCount,上限 = min(90 秒, max(25 秒, 10 秒 + 筆數 x 0.7 秒)):下限釘 25 秒所以 9 筆以下與舊版完全相同(小量零回歸),50 筆放大到 45 秒(對 24.7 秒有 20 秒餘裕),上限封 90 秒避免真掛掉時無限等;並印出本批用了幾秒上限,方便之後累積樣本。②findNextPageBtn 回傳 null 時不分原因,呼叫端只能一律當異常 —— 於是每一輪正常掃完都印一行「⚠️ 找不到下一頁按鈕」再加 800 字 HTML dump,即使上一行才剛印過「父 li 有 .disabled,已是最後一頁」。新增 lastNextPageReason 區分 disabled(確定最後一頁,正常結束)與 not-found(結構可能變了,才該出聲),掃描呼叫端與診斷輸出同步分級。這兩行雜訊會讓「本輪零 warn」難以一眼判讀,警告區必須乾淨到「有東西出現就是真的有事」。基於 V11.60 修「重複單保留筆不會被拋單印標籤」:V11.39 把保留筆分到階段 C-1,只點「當天出貨」按鈕就結束,註解明寫「不拋印」。這個前提是錯的 —— 保留筆是今天真的要出的訂單,跟一般單一樣需要物流單號與標籤(2026-09-01 Tina 定版)。它以前看起來沒問題,是因為拋印迴圈是「分頁上有什麼列就勾什麼」(不照名單勾),保留筆若是超商會跟 NORMAL 超商單躺在同一個「已確認」分頁被順便掃走 —— 靠巧合不是設計。2026-09-01 踩到反例:5 筆出貨單中保留筆是宅配、NORMAL 一筆宅配都沒有 → runLogisticsByGroup 的 group 由 NORMAL 名單算出 → 宅配那條腿 group.length===0 → 整段跳過 → 那筆分流到「處理中」分頁後沒拋單沒標籤,貨出不去,而且只印一行資訊級「無訂單,跳過」,看 log 的人不會發現(紀律 4 的反面)。修法三件事:①階段 C-1／C-2 合併,保留筆併入同一份名單一起跑 runLogisticsByGroup(它第一步就是 autoSplitForToday,分流行為完全不變,差別只在後面不再中斷),進入條件從「NORMAL>0」改為「合計>0」以免只有保留筆時整段又被跳過。②新增收尾對帳:processOneCarrier 改為回傳實際處理到的訂單 id,runLogisticsByGroup 跑完比對「該拋的」與「實際拋到的」,有差額就 warn+toast+alert 並列出訂單編號 —— ①只堵住這一種組合,②才是通用防線,以後不管什麼原因漏拋都會被抓出來;另外會單獨點名「物流欄三家都對不上」的單。③「無訂單,跳過」改寫成「本輪出貨名單中無此物流」,講清楚判斷依據 —— 舊訊息會被讀成「平台上沒這家的單」。基於 V11.59 修一個藏很久的根因:document.querySelectorAll('tbody tr') 會同時抓到 1shop 的訂單表格「和中控台自己看板的表格」—— 看板每一列也有 <a href=".../shop/order/all/{id}"> 和 checkbox,跟平台列長得一模一樣。2026-08-26 用 51 筆跨頁測出來:拋印每批 50 筆的額度被自家看板列吃掉大半(已確認分頁 85 列 = 平台 34 + 看板 51),第 2 批剩下的 11 筆全是看板列 → 平台端 0 勾選 → 「更多批次功能」按鈕依 P6 不會渲染 → 兩行假警報。這次標籤沒漏印(第 1 批已涵蓋全部 34 張),但真實訂單超過 50 筆時就會變成真的漏印。修法:新增 platformRows() 排除 #v11-overlay 內的列,套用到拋印迴圈、getFreshRowById、全選、取消全選、掃描共 8 處。另修拋印失敗的訊息:舊版把「找不到按鈕(失敗)」印成「⏭ 跳過(已拋過或不適用)」,又把失敗筆算進「共拋 N 筆」;現在三種結果分開講,失敗筆單獨列清單。基於 V11.58:宅配的物流單確實會開在新分頁,但不走攔截器的三條路徑(form submit / window.open / a target=_blank),所以每輪都白等 25 秒再印一行「⚠️ 25 秒內沒收到背景開頁事件」。實測已確認那是誤報(A 平台事實 P15)。改為依物流商決定等待秒數:7-11 / 全家 預期走 window.open → 維持 25 秒,逾時升級為 warn(那才是真失敗);宅配已知不走 → 只給 3 秒寬限,逾時只留一行資訊。省 22 秒是附帶效果,主要目的是別再喊狼來了 —— 每輪都跳一個看起來像失敗的警告,久了會養成忽略警告區的習慣,真正的失敗訊號就被埋掉(紀律 4 的反面)。基於 V11.57:看了後台截圖才知道金流欄一格裡有三段(交易管道 + 金流狀態 + 附註),而且同一格可能同時出現兩個狀態字樣(實例「LINE Pay / ● 已付款 1 / 交易成功」)。V11.56 用精準比對,在那種格子上會全部落空 → 每一筆都被判「未收錄」→ 一筆都出不了貨。改為「包含比對 + 固定優先序」:已退款 > 付款失敗/交易逾時/交易取消 > 貨到付款/超商取貨時付款 > 交易成功/已付款 > 等待付款/待確認付款/未付款 > 未收錄。其中「貨到付款必須贏過等待付款」這層保護 V11.55 以前藏在 isUnpaid 的排除條件裡,改成包含比對後必須明確寫回來,否則所有貨到付款單都會被擋著並寄催繳信。另新增第 11 種狀態「已退款」:不出貨、不發信、寫備註移確認中(退款的錢已經還給客人,再寄催繳信是錯的)。判定只認金流狀態,永不比對交易管道(管道是開放清單,分期期數會變動)。基於 V11.56:①【最嚴重】「付款失敗/交易逾時/交易取消」三種狀態原本四個判定式全部落空,classifyOrders 掉到 else → 歸成「可出貨一般單」→ 被自動拋單出貨,也就是把貨寄給沒付錢的人(這三種狀態確實會出現在等待確認分頁)。修法:改用「可出貨白名單」,只有已付款/交易成功/貨到付款/超商取貨時付款算可出貨,其餘一律不出貨;未收錄的新狀態不出貨也不發信,並出聲提示。②判定只比對 .status-name(付款狀態欄還有天數/次數徽章,串接後永遠對不上)。③重複單改為單一情境判定 judgeDupGroup,規則收斂成一條:會成立的付款恰好 1 筆才保留並發信,其餘一切交客服 —— 修掉「兩筆都貨到付款/都刷卡成功卻自動取消一筆並寄信」與「看板顯示與實際行為相反」。④UNPAID_DUP 角色退役。基於 V11.55:①【根因】發信內文框指紋錯誤 —— 平台欄位是 body_code 不是 body,舊指紋永遠抓不到 → 主旨填得進、內文逾時 → 信框跳出來又自己關掉,信沒寄出(A 平台事實 P10)。②【靜默失敗】階段 A 沒接 processNoteForOrder / sendEmailForOrder 的回傳值,備註沒寫、信沒寄都只有 console warn,訂單照樣被移分頁出貨 → 改為失敗進清單、跳 toast、跑完彈 alert,且失敗筆不進階段 B/C。③【公版】popup 存的公版從來沒被讀取,使用者改了沒感覺 → 接上 getStoredTemplate 並拆重複單/未付款兩組;卡片編輯框只在真被改過時才覆寫(舊版永遠預填非空,把「取消筆不發信」閘門整條繞過)。④【死碼】dupRole 的 UNPAID_DUP / PENDING 從未被指派 → 補上實際條件,整組無成功筆時不再硬選 KEEP 寄出「已幫您取消」。基於 V11.54 分批拋印修正::「更多批次功能」按鈕是 1shop「有勾選訂單才由 Vue 渲染」的,V11.52 每批印後取消勾選(按鈕消失),第 2 批重新勾選後 Vue 需時間重繪按鈕,原本一次性 findBtnByText 常抓不到 → 第 2 批拋單/印單靜默跳過(第 1 批成功、第 2 批失敗)。修法:tryThrowAction / doPrintAction 找「更多批次功能」改為 waitFor 等待重試(4 秒),給 Vue 渲染時間。基於 V11.53 商品組合下拉透明統計
+// @version      11.62.0
+// @description  V11.62 修兩個只有「大量＋跨頁」才會現形的漏單路徑,2026-09-07 用 85 筆分兩頁測出來。①階段 A 有跨頁迴圈,但階段 B(移分頁)與階段 C 的分流(autoSplitForToday)沒有 —— 兩者都用 getFreshRowById 找列,而那只掃當下顯示的那一頁。實測:「開始移動 10 筆到確認中」只「勾選 3/10 筆」卻仍印「✔ 批次移動完成」,7 筆沒被移走而且完全沒出聲;分流那邊 cvs 50 筆只勾到 38,12 筆印完「找不到訂單列」後就沒人再管,從此沒分流沒拋單沒標籤。修法:新增 foreachOrderByLivePage —— 不信任掃描當下記的 scanPage(到階段 B/C 時訂單已被移走一些、平台分頁會重排,頁碼過期),改為實際去每一頁找,而且每做完一次動作就回第 1 頁重掃(移走訂單會讓後面頁的往前遞補,只往後走會漏掉遞補上來的);跑完仍找不到的一律 warn+alert 列出訂單編號。②拋印批次上限 50 → 12(→ A 平台事實 P20):真正的瓶頸不在勾選而在平台列印 API,實測一次送 35 筆 order_ids 會回 502、標籤沒產生,而拋單那步是成功的。12 是 Tina 長期人工處理的安全值(伺服器出錯期間 12 最穩定,再多會一直失敗)。做成 localStorage 可調,因為確切門檻沒被量過也可能隨負載浮動。③doPrintAction 從 boolean 改回傳原因碼:舊版在「點了最終列印但預期的背景開頁沒發生」時照樣 return true,於是收尾對帳把那批算成拋到了 —— 2026-09-07 就是這樣,對帳說 71 筆只少 12 筆,那 38 筆「有單號沒標籤」的完全沒被算進去。這是最危險的組合:出貨清單看起來正常,倉庫卻沒標籤可貼。現在單獨列一類「拋單成功但標籤沒產生」,並註明只要重印不要重拋。基於 V11.61 兩件事,都是「別讓正常狀況長得像失敗」(紀律 4)。①背景開頁的等待上限舊版對所有批次寫死 25 秒,但耗時是隨筆數長的 —— 7-11 同一條路徑實測 4 筆 3.0 秒、4 筆 3.8 秒、9 筆 7.8 秒、50 筆 24.7 秒,50 筆離逾時只剩 0.3 秒。再慢一點就會印出「25 秒內沒收到背景開頁事件」,但標籤其實有產生,那正是 V11.58 花力氣消掉的假警報又長回來,而且是在最需要相信警告的大量出貨場合。改為 doPrintAction 多收 batchCount,上限 = min(90 秒, max(25 秒, 10 秒 + 筆數 x 0.7 秒)):下限釘 25 秒所以 9 筆以下與舊版完全相同(小量零回歸),50 筆放大到 45 秒(對 24.7 秒有 20 秒餘裕),上限封 90 秒避免真掛掉時無限等;並印出本批用了幾秒上限,方便之後累積樣本。②findNextPageBtn 回傳 null 時不分原因,呼叫端只能一律當異常 —— 於是每一輪正常掃完都印一行「⚠️ 找不到下一頁按鈕」再加 800 字 HTML dump,即使上一行才剛印過「父 li 有 .disabled,已是最後一頁」。新增 lastNextPageReason 區分 disabled(確定最後一頁,正常結束)與 not-found(結構可能變了,才該出聲),掃描呼叫端與診斷輸出同步分級。這兩行雜訊會讓「本輪零 warn」難以一眼判讀,警告區必須乾淨到「有東西出現就是真的有事」。基於 V11.60 修「重複單保留筆不會被拋單印標籤」:V11.39 把保留筆分到階段 C-1,只點「當天出貨」按鈕就結束,註解明寫「不拋印」。這個前提是錯的 —— 保留筆是今天真的要出的訂單,跟一般單一樣需要物流單號與標籤(2026-09-01 Tina 定版)。它以前看起來沒問題,是因為拋印迴圈是「分頁上有什麼列就勾什麼」(不照名單勾),保留筆若是超商會跟 NORMAL 超商單躺在同一個「已確認」分頁被順便掃走 —— 靠巧合不是設計。2026-09-01 踩到反例:5 筆出貨單中保留筆是宅配、NORMAL 一筆宅配都沒有 → runLogisticsByGroup 的 group 由 NORMAL 名單算出 → 宅配那條腿 group.length===0 → 整段跳過 → 那筆分流到「處理中」分頁後沒拋單沒標籤,貨出不去,而且只印一行資訊級「無訂單,跳過」,看 log 的人不會發現(紀律 4 的反面)。修法三件事:①階段 C-1／C-2 合併,保留筆併入同一份名單一起跑 runLogisticsByGroup(它第一步就是 autoSplitForToday,分流行為完全不變,差別只在後面不再中斷),進入條件從「NORMAL>0」改為「合計>0」以免只有保留筆時整段又被跳過。②新增收尾對帳:processOneCarrier 改為回傳實際處理到的訂單 id,runLogisticsByGroup 跑完比對「該拋的」與「實際拋到的」,有差額就 warn+toast+alert 並列出訂單編號 —— ①只堵住這一種組合,②才是通用防線,以後不管什麼原因漏拋都會被抓出來;另外會單獨點名「物流欄三家都對不上」的單。③「無訂單,跳過」改寫成「本輪出貨名單中無此物流」,講清楚判斷依據 —— 舊訊息會被讀成「平台上沒這家的單」。基於 V11.59 修一個藏很久的根因:document.querySelectorAll('tbody tr') 會同時抓到 1shop 的訂單表格「和中控台自己看板的表格」—— 看板每一列也有 <a href=".../shop/order/all/{id}"> 和 checkbox,跟平台列長得一模一樣。2026-08-26 用 51 筆跨頁測出來:拋印每批 50 筆的額度被自家看板列吃掉大半(已確認分頁 85 列 = 平台 34 + 看板 51),第 2 批剩下的 11 筆全是看板列 → 平台端 0 勾選 → 「更多批次功能」按鈕依 P6 不會渲染 → 兩行假警報。這次標籤沒漏印(第 1 批已涵蓋全部 34 張),但真實訂單超過 50 筆時就會變成真的漏印。修法:新增 platformRows() 排除 #v11-overlay 內的列,套用到拋印迴圈、getFreshRowById、全選、取消全選、掃描共 8 處。另修拋印失敗的訊息:舊版把「找不到按鈕(失敗)」印成「⏭ 跳過(已拋過或不適用)」,又把失敗筆算進「共拋 N 筆」;現在三種結果分開講,失敗筆單獨列清單。基於 V11.58:宅配的物流單確實會開在新分頁,但不走攔截器的三條路徑(form submit / window.open / a target=_blank),所以每輪都白等 25 秒再印一行「⚠️ 25 秒內沒收到背景開頁事件」。實測已確認那是誤報(A 平台事實 P15)。改為依物流商決定等待秒數:7-11 / 全家 預期走 window.open → 維持 25 秒,逾時升級為 warn(那才是真失敗);宅配已知不走 → 只給 3 秒寬限,逾時只留一行資訊。省 22 秒是附帶效果,主要目的是別再喊狼來了 —— 每輪都跳一個看起來像失敗的警告,久了會養成忽略警告區的習慣,真正的失敗訊號就被埋掉(紀律 4 的反面)。基於 V11.57:看了後台截圖才知道金流欄一格裡有三段(交易管道 + 金流狀態 + 附註),而且同一格可能同時出現兩個狀態字樣(實例「LINE Pay / ● 已付款 1 / 交易成功」)。V11.56 用精準比對,在那種格子上會全部落空 → 每一筆都被判「未收錄」→ 一筆都出不了貨。改為「包含比對 + 固定優先序」:已退款 > 付款失敗/交易逾時/交易取消 > 貨到付款/超商取貨時付款 > 交易成功/已付款 > 等待付款/待確認付款/未付款 > 未收錄。其中「貨到付款必須贏過等待付款」這層保護 V11.55 以前藏在 isUnpaid 的排除條件裡,改成包含比對後必須明確寫回來,否則所有貨到付款單都會被擋著並寄催繳信。另新增第 11 種狀態「已退款」:不出貨、不發信、寫備註移確認中(退款的錢已經還給客人,再寄催繳信是錯的)。判定只認金流狀態,永不比對交易管道(管道是開放清單,分期期數會變動)。基於 V11.56:①【最嚴重】「付款失敗/交易逾時/交易取消」三種狀態原本四個判定式全部落空,classifyOrders 掉到 else → 歸成「可出貨一般單」→ 被自動拋單出貨,也就是把貨寄給沒付錢的人(這三種狀態確實會出現在等待確認分頁)。修法:改用「可出貨白名單」,只有已付款/交易成功/貨到付款/超商取貨時付款算可出貨,其餘一律不出貨;未收錄的新狀態不出貨也不發信,並出聲提示。②判定只比對 .status-name(付款狀態欄還有天數/次數徽章,串接後永遠對不上)。③重複單改為單一情境判定 judgeDupGroup,規則收斂成一條:會成立的付款恰好 1 筆才保留並發信,其餘一切交客服 —— 修掉「兩筆都貨到付款/都刷卡成功卻自動取消一筆並寄信」與「看板顯示與實際行為相反」。④UNPAID_DUP 角色退役。基於 V11.55:①【根因】發信內文框指紋錯誤 —— 平台欄位是 body_code 不是 body,舊指紋永遠抓不到 → 主旨填得進、內文逾時 → 信框跳出來又自己關掉,信沒寄出(A 平台事實 P10)。②【靜默失敗】階段 A 沒接 processNoteForOrder / sendEmailForOrder 的回傳值,備註沒寫、信沒寄都只有 console warn,訂單照樣被移分頁出貨 → 改為失敗進清單、跳 toast、跑完彈 alert,且失敗筆不進階段 B/C。③【公版】popup 存的公版從來沒被讀取,使用者改了沒感覺 → 接上 getStoredTemplate 並拆重複單/未付款兩組;卡片編輯框只在真被改過時才覆寫(舊版永遠預填非空,把「取消筆不發信」閘門整條繞過)。④【死碼】dupRole 的 UNPAID_DUP / PENDING 從未被指派 → 補上實際條件,整組無成功筆時不再硬選 KEEP 寄出「已幫您取消」。基於 V11.54 分批拋印修正::「更多批次功能」按鈕是 1shop「有勾選訂單才由 Vue 渲染」的,V11.52 每批印後取消勾選(按鈕消失),第 2 批重新勾選後 Vue 需時間重繪按鈕,原本一次性 findBtnByText 常抓不到 → 第 2 批拋單/印單靜默跳過(第 1 批成功、第 2 批失敗)。修法:tryThrowAction / doPrintAction 找「更多批次功能」改為 waitFor 等待重試(4 秒),給 Vue 渲染時間。基於 V11.53 商品組合下拉透明統計
 // @author       Tina + Claude
 // @match        *://admin.1shop.tw/*
 // @run-at       document-idle
@@ -19,7 +19,7 @@
   // ============================================================
   //  ⓪ 全域常數 / 設定
   // ============================================================
-  const VERSION = 'V11.61';
+  const VERSION = 'V11.62';
   const LS = {
     PRE_KWS: 'v11_preorder_kws',          // 預購關鍵字
     SCAN_PAGES: 'v11_scan_pages',         // 深潛頁數
@@ -33,6 +33,9 @@
     RESUME_PAYLOAD: 'v11_resume_payload', // 跨頁續航攜帶資料
     LAST_KANBAN: 'v11_last_kanban_open',  // 上次是否開著看板
     PREORDER_TAB: 'v11_preorder_tab',     // 預購要移到哪個分頁(暫存 / 其他)
+    // ★ V11.62:拋印每批筆數。預設 12 —— 平台列印 API 筆數多會回 502(→ A 平台事實 P20)。
+    //   做成可調是因為那個門檻沒被量過、也可能隨平台當下負載浮動,不該寫死在程式裡。
+    BATCH_SIZE: 'v11_batch_size',         // 拋印每批最多幾筆(預設 12)
   };
 
   // ── F12 已校正的元素指紋 ──
@@ -1540,6 +1543,54 @@ ${lines}
       await callback(byPage[p], p);
       log(`[跨頁] ✔ 第 ${p} 頁處理完`);
     }
+  }
+
+  /** ★ V11.62:把一批訂單「不管它們現在散在哪一頁」都處理完(→ E 檔 T28)
+   *
+   *  跟上面 foreachOrderAcrossPages 的差別,以及為什麼需要第二個:
+   *    那個信任掃描當下記下的 o.scanPage。階段 A 用它沒問題,因為那時還沒有人動過訂單。
+   *    但到了階段 B(移分頁)與階段 C(分流),每做一次動作就會有訂單離開「等待確認」,
+   *    平台分頁會重排、後面頁的訂單往前遞補 —— scanPage 從那一刻起就是過期資訊。
+   *
+   *  所以這個改為「實際去每一頁找」,而且**每做完一次動作就回第 1 頁重掃**:
+   *    只往後走會漏掉遞補上來的訂單(第 2 頁的單被擠到第 1 頁,而我們已經離開第 1 頁了)。
+   *
+   *  callback 回傳 false 代表「找到了但動作失敗」,這種一樣會從待處理清單移除
+   *  (否則會無限重試同一批),但呼叫端要自己記下來出聲。
+   *  回傳值是「掃遍所有分頁仍然找不到的訂單」—— 呼叫端必須出聲,不可當作成功(紀律 4)。
+   */
+  async function foreachOrderByLivePage(orders, callback, label = '') {
+    const remaining = new Map((orders || []).map(o => [o.id, o]));
+    if (remaining.size === 0) return [];
+    const MAX_SWEEPS = 40;   // 防呆:每次動作最多讓待處理數少 1,40 次足夠涵蓋實務規模
+    const MAX_PAGES = 30;    // 與掃描的頁數上限一致
+    let sweeps = 0;
+
+    while (remaining.size > 0 && sweeps < MAX_SWEEPS) {
+      sweeps++;
+      let acted = false;
+
+      for (let p = 1; p <= MAX_PAGES; p++) {
+        if (remaining.size === 0) break;
+        await gotoPage(p);
+        await sleep(1200);
+
+        const present = [...remaining.values()].filter(o => getFreshRowById(o.id));
+        if (present.length > 0) {
+          log(`[跨頁${label}] 第 ${p} 頁找到 ${present.length} 筆(待處理總數 ${remaining.size})`);
+          await callback(present, p);
+          present.forEach(o => remaining.delete(o.id));
+          acted = true;
+          break;   // 動作可能讓分頁重排 → 回第 1 頁重掃
+        }
+
+        if (!findNextPageBtn()) break;   // 沒有下一頁,這一輪掃完了
+      }
+
+      if (!acted) break;   // 整輪掃過所有分頁都找不到 → 剩下的就是真的不在了
+    }
+
+    return [...remaining.values()];
   }
 
   // ★ V11.61:記錄 findNextPageBtn 為什麼回傳 null(→ E 檔 T24 ②)
@@ -3195,11 +3246,15 @@ ${lines}`);
     }
 
     // 2) 對每個目標分頁執行一次批次移動
-    for (const [tab, orders] of Object.entries(tabGroups)) {
-      if (!orders || orders.length === 0) continue;
-      toast(`📂 批次移動 ${orders.length} 筆 → ${tab}`, 'info', 1500);
-      log(`[移分頁] ▶ 開始移動 ${orders.length} 筆到「${tab}」`);
+    // ★ V11.62:改為跨頁處理(→ E 檔 T28)
+    //   舊版只勾「當下顯示那一頁」的列。2026-09-07 實測 85 筆分兩頁:
+    //   「▶ 開始移動 10 筆到確認中」→「勾選 3/10 筆」→ 仍印「✔ 批次移動完成」,
+    //   7 筆沒被移走、而且完全沒出聲(紀律 4 的反面:數字有印,語氣卻說一切正常)。
+    const moveMissing = [];   // 掃遍所有分頁都找不到的
+    const moveFailed = [];    // 找到了但批次動作失敗的
 
+    /** 在「目前這一頁」把 pageOrders 勾起來並執行一次批次移動。回傳是否成功 */
+    async function moveBatchOnCurrentPage(pageOrders, tab) {
       // 2-1) 強力關閉殘留 modal,取消所有勾選
       forceCloseAllModals();
       await sleep(500);
@@ -3208,12 +3263,16 @@ ${lines}`);
 
       // 2-2) 勾選這批訂單
       let checkedCount = 0;
-      for (const o of orders) {
+      for (const o of pageOrders) {
         const tr = getFreshRowById(o.id);
         const cb = tr?.querySelector('input[type="checkbox"]');
         if (cb && !cb.checked) { cb.click(); checkedCount++; await sleep(50); }
       }
-      log(`[移分頁]   勾選 ${checkedCount}/${orders.length} 筆`);
+      log(`[移分頁]   勾選 ${checkedCount}/${pageOrders.length} 筆`);
+      if (checkedCount === 0) {
+        warn(`[移分頁] ⚠️ 這一頁一筆都沒勾到(列在但 checkbox 抓不到?),本批不執行移動`);
+        return false;
+      }
 
       // 2-3) ★ V11.39 改用 waitFor 等批次狀態下拉出現(動態顯示,可能要等 1-2 秒)
       //   1shop 真實 UI:勾選訂單後,工具列才動態顯示 3 個 select(訂單狀態/金流狀態/物流狀態)
@@ -3235,7 +3294,7 @@ ${lines}`);
           const opts = Array.from(s.options || []).slice(0, 3).map(o => `"${(o.textContent || '').trim()}"`).join(',');
           log(`  [${i+1}] class="${s.className.slice(0,80)}" 前3選項=${opts}`);
         });
-        continue;
+        return false;
       }
       log(`[移分頁]   找到批次狀態下拉(class="${statusSelect.className.slice(0,60)}")`);
 
@@ -3245,7 +3304,7 @@ ${lines}`);
       );
       if (!targetOption) {
         warn(`[移分頁] ❌ 下拉選單裡找不到「${tab}」選項`);
-        continue;
+        return false;
       }
       log(`[移分頁]   下拉選「${tab}」 (value="${targetOption.value}")`);
       setNativeValue(statusSelect, targetOption.value);
@@ -3258,7 +3317,7 @@ ${lines}`);
       });
       if (!updateBtn) {
         warn('[移分頁] ❌ 找不到「更新」按鈕');
-        continue;
+        return false;
       }
       log(`[移分頁]   點「更新」按鈕`);
       updateBtn.click();
@@ -3279,7 +3338,47 @@ ${lines}`);
         await sleep(500);
       }
 
-      log(`[移分頁] ✔ 「${tab}」批次移動完成`);
+      log(`[移分頁]   本頁 ${pageOrders.length} 筆已送出「${tab}」`);
+      return true;
+    }
+
+    // 2) 對每個目標分頁,跨頁把該去的訂單都移過去
+    for (const [tab, orders] of Object.entries(tabGroups)) {
+      if (!orders || orders.length === 0) continue;
+      toast(`📂 批次移動 ${orders.length} 筆 → ${tab}`, 'info', 1500);
+      log(`[移分頁] ▶ 開始移動 ${orders.length} 筆到「${tab}」`);
+
+      const missing = await foreachOrderByLivePage(orders, async (pageOrders) => {
+        const ok = await moveBatchOnCurrentPage(pageOrders, tab);
+        if (!ok) moveFailed.push(...pageOrders.map(o => `${o.id}(→${tab})`));
+      }, `移分頁→${tab}`);
+
+      // ★ V11.62:少一筆都要出聲,不能再無條件印「✔ 完成」
+      if (missing.length > 0) {
+        moveMissing.push(...missing.map(o => `${o.id}(→${tab})`));
+        warn(`[移分頁] ⚠️「${tab}」有 ${missing.length} 筆掃遍所有分頁都找不到,沒有被移動:${missing.map(o => o.id).join(', ')}`);
+      } else {
+        log(`[移分頁] ✔ 「${tab}」批次移動完成(${orders.length} 筆全部處理到)`);
+      }
+    }
+
+    // ★ V11.62:階段 B 的收尾對帳 —— 跟階段 C 的收尾對帳同一個道理,
+    //   沒移到的訂單會原地留在「等待確認」,不出聲的話下游完全看不出來。
+    const allMoveProblems = [...moveMissing, ...moveFailed];
+    if (allMoveProblems.length > 0) {
+      const lines = [];
+      if (moveMissing.length > 0) lines.push(`・找不到訂單列 ${moveMissing.length} 筆:${moveMissing.join(', ')}`);
+      if (moveFailed.length > 0) lines.push(`・批次動作失敗 ${moveFailed.length} 筆:${moveFailed.join(', ')}`);
+      warn(`[移分頁] ⚠️ 階段 B 有 ${allMoveProblems.length} 筆沒移成功:
+${lines.join('\n')}`);
+      toast(`⚠️ 移分頁有 ${allMoveProblems.length} 筆沒完成,請看 console 手動處理`, 'warn', 9000);
+      alert(`⚠️ 階段 B 移分頁未完成
+
+以下訂單沒有被移到目標分頁,仍留在「等待確認」,請手動處理:
+
+${lines.join('\n')}`);
+    } else {
+      log(`[移分頁] ✔ 階段 B 全部完成,無遺漏`);
     }
   }
 
@@ -3330,6 +3429,7 @@ ${lines}`);
       carriers.some(k => LOGISTICS[k].shipTextMatch.some(t => (o.shipText || '').includes(t))));
     const unmatched = which === 'all' ? orders.filter(o => !inScope.includes(o)) : [];
     const thrownAll = new Set();
+    const noLabelAll = new Set();   // ★ V11.62:拋單成功但標籤沒產生的(→ E 檔 T29)
 
     for (const key of carriers) {
       const cfg = LOGISTICS[key];
@@ -3382,6 +3482,8 @@ ${lines}`);
           if (!res.failedIds || !res.failedIds.has(id)) thrownAll.add(id);
         }
       }
+      // ★ V11.62:標籤沒產生的另外收 —— 這些「有拋到」但不算完成
+      if (res && res.noLabelIds) res.noLabelIds.forEach(id => noLabelAll.add(id));
 
       // ★ V11.40:不再等 PDF 下載完成(已改用背景分頁),只給短緩衝讓 toast 顯示完
       toast(`📂 ${cfg.label} 物流單已在背景分頁,切換下一家...`, 'info', 1500);
@@ -3394,10 +3496,15 @@ ${lines}`);
     //   註:thrownAll 可能比 inScope 多 —— 已確認分頁預設不帶日期篩選(P16),
     //   迴圈會把分頁上的舊單一起掃到,但平台只對當批實際拋過的產標籤(P17),所以多不是問題,少才是。
     const missed = inScope.filter(o => !thrownAll.has(o.id));
-    if (missed.length > 0 || unmatched.length > 0) {
+    // ★ V11.62:只算「本輪該出貨」的那些,分頁上順便掃到的舊單不列(→ E 檔 T29)
+    const noLabelInScope = inScope.filter(o => noLabelAll.has(o.id));
+    if (missed.length > 0 || unmatched.length > 0 || noLabelInScope.length > 0) {
       const lines = [];
       if (missed.length > 0) {
         lines.push(`・沒拋到 ${missed.length} 筆:${missed.map(o => o.id).join(', ')}`);
+      }
+      if (noLabelInScope.length > 0) {
+        lines.push(`・拋單成功但**標籤沒產生** ${noLabelInScope.length} 筆(訂單已有物流單號,只要重印標籤,不要重拋):${noLabelInScope.map(o => o.id).join(', ')}`);
       }
       if (unmatched.length > 0) {
         lines.push(`・物流無法辨識 ${unmatched.length} 筆(不屬於 7-11／全家／宅配 任一家,整輪都沒被處理):${unmatched.map(o => `${o.id}(物流欄「${o.shipText || '空白'}」)`).join(', ')}`);
@@ -3475,91 +3582,91 @@ ${lines.join('\n')}`);
 
     const W = (typeof unsafeWindow !== 'undefined') ? unsafeWindow : window;
 
-    // ─ A. 處理超商 cvs 組(7-11+全家)─
-    if (cvsOrders.length > 0) {
-      toast(`🟢 超商當天出貨 ${cvsOrders.length} 筆(7-11/全家)`, 'info', 2000);
+    // ★ V11.62:兩組都改為跨頁處理(→ E 檔 T28)
+    //   舊版只勾「當下顯示那一頁」的列。2026-09-07 實測 85 筆分兩頁:
+    //   cvs 分組 50 筆卻只勾到 38,另外 12 筆印完「找不到訂單列」之後就沒有人再管 ——
+    //   那 12 筆從此沒分流、沒拋單、沒標籤。收尾對帳有抓到(V11.60 ②),
+    //   但那是最後一道防線,不該讓它變成日常唯一會講話的人。
+    const CVS_CFG = {
+      kind: 'cvs', label: '超商', emoji: '🟢', color: '綠色',
+      btnMatch: [['超商', '當天出貨'], ['超商', '出貨']],
+      bulkAction: 'unipay_cvs_order_today',
+    };
+    const HCT_CFG = {
+      kind: 'hct', label: '宅配', emoji: '🔴', color: '紅色',
+      btnMatch: [['宅配', '當天出貨'], ['宅配', '出貨']],
+      bulkAction: 'hct_order_today',
+    };
+
+    /** 在「目前這一頁」把 pageOrders 勾起來,點該組的「當天出貨」按鈕 */
+    async function splitGroupOnCurrentPage(pageOrders, cfg) {
       uncheckAllRows();
       await sleep(400);
 
       // ★ V11.39:勾選時拉長間隔到 100ms,讓 Vue reactive 完整同步
-      let checkedCvs = 0;
-      for (const o of cvsOrders) {
+      let checked = 0;
+      for (const o of pageOrders) {
         const tr = getFreshRowById(o.id);
-        if (!tr) { warn(`[autoSplit] cvs 找不到訂單列 ${o.id}(可能不在當前分頁)`); continue; }
+        // ★ V11.62:跨頁 helper 剛確認過這批就在本頁,這裡還對不到只可能是剛被移走
+        if (!tr) { warn(`[autoSplit] ${cfg.kind} 訂單列 ${o.id} 在勾選前消失了`); continue; }
         const cb = tr.querySelector('input[type="checkbox"]');
-        if (cb && !cb.checked) { cb.click(); checkedCvs++; await sleep(100); }
+        if (cb && !cb.checked) { cb.click(); checked++; await sleep(100); }
       }
-      log(`[autoSplit] cvs 勾選 ${checkedCvs}/${cvsOrders.length} 筆`);
+      log(`[autoSplit] ${cfg.kind} 本頁勾選 ${checked}/${pageOrders.length} 筆`);
 
-      if (checkedCvs === 0) {
-        warn(`[autoSplit] cvs 沒勾到任何訂單,跳過此組(可能訂單已不在「等待確認」分頁)`);
+      if (checked === 0) {
+        warn(`[autoSplit] ${cfg.kind} 本頁一筆都沒勾到,跳過這一頁`);
+        return;
+      }
+
+      // ★ V11.39:勾選後等 1.5 秒讓 1shop 工具列「當天出貨」按鈕渲染出來
+      await sleep(1500);
+
+      // ★ V11.39:用 waitFor 最多等 3.5 秒讓按鈕出現
+      const btn = await waitFor(() =>
+        findBtnByText(cfg.btnMatch[0]) || findBtnByText(cfg.btnMatch[1]),
+        3500
+      );
+      if (btn) {
+        log(`👉 點「${cfg.label}當天出貨」按鈕(${cfg.color}):「${btn.textContent.trim()}」`);
+        btn.click();
+        await sleep(2000);
+        const cb = await waitFor(() => findModalConfirmBtn(), 2500);
+        if (cb) { log(`點確認彈窗:「${cb.textContent.trim()}」`); cb.click(); await sleep(1500); }
+      } else if (typeof W.bulk_action === 'function') {
+        log(`找不到「${cfg.label}當天出貨」按鈕,fallback 呼叫 bulk_action`);
+        try { W.bulk_action(cfg.bulkAction); } catch (e) { warn(e); }
+        await sleep(2000);
       } else {
-        // ★ V11.39:勾選後等 1.5 秒讓 1shop 工具列「當天出貨」按鈕渲染出來
-        await sleep(1500);
+        warn(`找不到「${cfg.label}當天出貨」按鈕,也沒 bulk_action 函式`);
+        diagShipBtns();
+      }
+      await sleep(2500);
+    }
 
-        // ★ V11.39:用 waitFor 最多等 3.5 秒讓按鈕出現
-        const greenBtn = await waitFor(() =>
-          findBtnByText(['超商', '當天出貨']) || findBtnByText(['超商', '出貨']),
-          3500
-        );
-        if (greenBtn) {
-          log(`👉 點「超商當天出貨」按鈕(綠色):「${greenBtn.textContent.trim()}」`);
-          greenBtn.click();
-          await sleep(2000);
-          const cb = await waitFor(() => findModalConfirmBtn(), 2500);
-          if (cb) { log(`點確認彈窗:「${cb.textContent.trim()}」`); cb.click(); await sleep(1500); }
-        } else if (typeof W.bulk_action === 'function') {
-          log('找不到「超商當天出貨」按鈕,fallback 呼叫 bulk_action');
-          try { W.bulk_action('unipay_cvs_order_today'); } catch (e) { warn(e); }
-          await sleep(2000);
-        } else {
-          warn('找不到「超商當天出貨」按鈕,也沒 bulk_action 函式');
-          diagShipBtns();
-        }
-        await sleep(2500);
+    // ─ 逐組跨頁分流(A. 超商 cvs / B. 宅配 hct)─
+    const splitMissing = [];
+    for (const [group, cfg] of [[cvsOrders, CVS_CFG], [hctOrders, HCT_CFG]]) {
+      if (group.length === 0) continue;
+      toast(`${cfg.emoji} ${cfg.label}當天出貨 ${group.length} 筆`, 'info', 2000);
+
+      const missing = await foreachOrderByLivePage(group, async (pageOrders) => {
+        await splitGroupOnCurrentPage(pageOrders, cfg);
+      }, `autoSplit-${cfg.kind}`);
+
+      if (missing.length > 0) {
+        splitMissing.push(...missing.map(o => `${o.id}(${cfg.label})`));
+        warn(`[autoSplit] ⚠️ ${cfg.kind} 有 ${missing.length} 筆掃遍所有分頁都找不到,沒有分流:${missing.map(o => o.id).join(', ')}`);
+      } else {
+        log(`[autoSplit] ✔ ${cfg.kind} ${group.length} 筆全部分流完成`);
       }
     }
 
-    // ─ B. 處理宅配 hct 組 ─
-    if (hctOrders.length > 0) {
-      toast(`🔴 宅配當天出貨 ${hctOrders.length} 筆`, 'info', 2000);
-      uncheckAllRows();
-      await sleep(400);
-
-      let checkedHct = 0;
-      for (const o of hctOrders) {
-        const tr = getFreshRowById(o.id);
-        if (!tr) { warn(`[autoSplit] hct 找不到訂單列 ${o.id}(可能不在當前分頁)`); continue; }
-        const cb = tr.querySelector('input[type="checkbox"]');
-        if (cb && !cb.checked) { cb.click(); checkedHct++; await sleep(100); }
-      }
-      log(`[autoSplit] hct 勾選 ${checkedHct}/${hctOrders.length} 筆`);
-
-      if (checkedHct === 0) {
-        warn(`[autoSplit] hct 沒勾到任何訂單,跳過此組`);
-      } else {
-        await sleep(1500);
-
-        const redBtn = await waitFor(() =>
-          findBtnByText(['宅配', '當天出貨']) || findBtnByText(['宅配', '出貨']),
-          3500
-        );
-        if (redBtn) {
-          log(`👉 點「宅配當天出貨」按鈕(紅色):「${redBtn.textContent.trim()}」`);
-          redBtn.click();
-          await sleep(2000);
-          const cb = await waitFor(() => findModalConfirmBtn(), 2500);
-          if (cb) { log(`點確認彈窗:「${cb.textContent.trim()}」`); cb.click(); await sleep(1500); }
-        } else if (typeof W.bulk_action === 'function') {
-          log('找不到「宅配當天出貨」按鈕,fallback 呼叫 bulk_action');
-          try { W.bulk_action('hct_order_today'); } catch (e) { warn(e); }
-          await sleep(2000);
-        } else {
-          warn('找不到「宅配當天出貨」按鈕,也沒 bulk_action 函式');
-          diagShipBtns();
-        }
-        await sleep(2500);
-      }
+    // ★ V11.62:分流沒成功的在這裡就出聲。沒分流 = 不會進「已確認」/「處理中」
+    //   = 後面拋印那一輪根本看不到它,貨就出不去。
+    if (splitMissing.length > 0) {
+      warn(`[autoSplit] ⚠️ 共 ${splitMissing.length} 筆沒分流到當天出貨:${splitMissing.join(', ')}`);
+      toast(`⚠️ ${splitMissing.length} 筆沒分流到,收尾對帳會再列一次`, 'warn', 7000);
     }
 
     toast(`✅ 自動分流完成`, 'success', 2000);
@@ -3621,12 +3728,20 @@ ${lines.join('\n')}`);
     //   前 50 拋完後再全選還是那 50 筆(已在 thrownIds),newRows 永遠 0 → 第 51 筆之後選不到。
     //   新做法:不碰 thead 全選,直接掃 tbody 全部列(DOM 內有完整列,實測 70/222 列都在),
     //           用 getOrderIdFromRow 比對 thrownIds 排除已拋,每批手動勾最多 BATCH_SIZE 筆。
-    const BATCH_SIZE = 50;           // 每批最多勾 50 筆(對齊 1shop 全選上限,實測 50 可成功)
+    // ★ V11.62:從 50 降到 12(→ A 平台事實 P20、E 檔 T29)
+    //   50 是「1shop 全選上限」這個技術限制推出來的,但真正的瓶頸不在勾選,在平台的列印 API。
+    //   2026-09-07 實測:一次送 35 筆 order_ids 給 /api/shop/order/logistics/print → 平台回 502,
+    //   標籤沒產生 —— 而拋單那一步是成功的,訂單已經有物流單號,倉庫端看不出少了標籤。
+    //   12 是 Tina 長期人工處理累積的安全值:「伺服器出錯的期間,一批 12 最穩定,再多會一直失敗」。
+    //   代價是批次數變多(50 筆從 1 批變 5 批),拿時間換成功率 —— 這支腳本穩定性優先於速度。
+    const BATCH_SIZE = Number(Storage.get(LS.BATCH_SIZE, '12')) || 12;
+    log(`[${cfg.label}] 本輪拋印批次上限 ${BATCH_SIZE} 筆／批(→ A 平台事實 P20)`);
     const MAX_ROUNDS = 60;           // 防呆:最多 60 輪
     let roundCount = 0;
     let pageCount = 1;
     const thrownIds = new Set();     // ★ V11.49:記住這輪已處理過的訂單 id(成敗都記,避免無限重試同一批)
     const failedIds = new Set();     // ★ V11.59:其中「拋單與印單都沒執行到」的,不可算進成功數(→ E 檔 T25)
+    const noLabelIds = new Set();    // ★ V11.62:「拋單成功但標籤沒產生」的,要單獨報(→ E 檔 T29)
 
     while (roundCount < MAX_ROUNDS) {
       roundCount++;
@@ -3711,7 +3826,9 @@ ${lines.join('\n')}`);
 
       // 3-6) 印單
       // ★ V11.61:把本批筆數傳下去,背景開頁的等待上限要跟著放大(→ E 檔 T24)
-      const printOK = await doPrintAction(cfg, batchIds.length);
+      // ★ V11.62:改收原因碼(→ E 檔 T29),舊版是 boolean 而且「標籤沒產生」也回 true
+      const printCode = await doPrintAction(cfg, batchIds.length);
+      const printOK = (printCode === 'ok');
 
       // 3-7) 把這批加入已處理 Set(不論成敗都記,避免無限重試同一批)
       batchIds.forEach(id => thrownIds.add(id));
@@ -3719,6 +3836,12 @@ ${lines.join('\n')}`);
       if (throwCode === 'no-batch-btn' && !printOK) {
         batchIds.forEach(id => failedIds.add(id));
         warn(`[${cfg.label}] 本批 ${batchIds.length} 筆拋單與印單都沒執行到,已記入失敗清單`);
+      } else if (printCode === 'no-bg-tab') {
+        // ★ V11.62:最危險的組合 —— 拋單成功、標籤沒產生(→ A 平台事實 P20、E 檔 T29)
+        //   訂單已經拿到物流單號,出貨清單上看起來一切正常,但倉庫沒有標籤可以貼。
+        //   舊版這批會被算成「拋到了」,收尾對帳完全不會提。
+        batchIds.forEach(id => noLabelIds.add(id));
+        warn(`[${cfg.label}] ⚠️ 本批 ${batchIds.length} 筆「拋單成功但標籤沒產生」—— 訂單已有單號,需要重印標籤`);
       }
 
       // 3-7b) ★ V11.52:印單後,用 batchIds 精準取消「這批」的勾選
@@ -3762,10 +3885,18 @@ ${lines.join('\n')}`);
       log(`[${cfg.label}] 跨頁拋印完成,共拋 ${okCount} 筆`);
     }
 
+    // ★ V11.62:「拋單成功但標籤沒產生」單獨講一次 —— 這批不會出現在失敗清單裡,
+    //   因為拋單那一步是成功的。不特別點名的話,它長得跟正常完成一模一樣。
+    if (noLabelIds.size > 0) {
+      warn(`[${cfg.label}] ⚠️ 共 ${noLabelIds.size} 筆有單號但沒標籤,需要重印:${[...noLabelIds].join(', ')}`);
+      toast(`⚠️ ${cfg.label} ${noLabelIds.size} 筆標籤沒產生,需要重印`, 'warn', 8000);
+    }
+
     // ★ V11.60:回報給上層做收尾對帳(→ E 檔 T27)。
     //   以前這個函式什麼都不回傳,上層無從得知「該拋的到底拋到沒有」,
     //   所以漏拋只能靠人事後數標籤張數才會發現。
-    return { thrownIds, failedIds };
+    // ★ V11.62:多回 noLabelIds —— 對帳要分「沒拋到」與「拋了但沒標籤」兩種
+    return { thrownIds, failedIds, noLabelIds };
   }
 
   /** 拋單階段:點「更多批次功能」→ 點該物流的拋單按鈕 → (宅配)確認 → 關閉結果
@@ -3849,7 +3980,7 @@ ${lines.join('\n')}`);
     const moreBtn = await waitFor(() => findBtnByText('更多批次'), 4000);
     if (!moreBtn) {
       warn(`[${cfg.label}] 找不到「更多批次功能」按鈕(印單階段,已等待重試)`);
-      return false;
+      return 'no-batch-btn';   // ★ V11.62:改回傳原因碼(與 tryThrowAction 一致)
     }
     log(`[${cfg.label}] 點「更多批次功能」(印單)`);
     moreBtn.click();
@@ -3859,7 +3990,7 @@ ${lines.join('\n')}`);
     if (!printBtn) {
       warn(`[${cfg.label}] 找不到印單按鈕「${cfg.printBtnText.join('+')}」於「${cfg.provider}」section`);
       forceCloseAllModals();
-      return false;
+      return 'no-print-btn';   // ★ V11.62:改回傳原因碼
     }
     log(`[${cfg.label}] 點印單按鈕「${printBtn.textContent.trim()}」`);
     printBtn.click();
@@ -3908,6 +4039,12 @@ ${lines.join('\n')}`);
         // 這家預期走 window.open 卻沒收到 → 真的可能沒印出來,要出聲
         warn(`[${cfg.label}] ⚠️ ${TIMEOUT/1000} 秒內沒收到「背景開頁」事件,而這家預期會走 window.open → 請確認物流單有沒有產生`);
         toast(`⚠️ ${cfg.label} 沒偵測到物流單分頁,請確認`, 'warn', 4000);
+        // ★ V11.62:這條路要回報失敗(→ E 檔 T29)。
+        //   舊版走到這裡照樣 return true,於是收尾對帳把這批算成「拋到了」——
+        //   2026-09-07 就是這樣:平台列印 API 回 502、標籤沒產生,對帳卻說 71 筆只少 12 筆,
+        //   那 38 筆「有單號沒標籤」的完全沒被算進去。
+        forceCloseAllModals();
+        return 'no-bg-tab';
       } else {
         log(`[${cfg.label}] 以非 window.open 路徑開新分頁(已知行為 → A 平台事實 P15),物流單已在新分頁`);
         toast(`ℹ️ ${cfg.label} 物流單已在新分頁`, 'info', 2500);
@@ -3922,8 +4059,9 @@ ${lines.join('\n')}`);
     } else {
       warn(`[${cfg.label}] 找不到 modal 內可用的最終列印按鈕「${cfg.finalPrintBtn}」`);
       forceCloseAllModals();
+      return 'no-final-btn';   // ★ V11.62:改回傳原因碼
     }
-    return true;
+    return 'ok';
   }
 
   /** ★ V11.39 強力關閉所有殘留 modal(ESC + 點所有可見的「關閉/取消」按鈕)*/
