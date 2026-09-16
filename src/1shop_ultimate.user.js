@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         🔥 1shop 出貨中控台 (V11.62 階段 B／分流改跨頁 + 拋印批次降到 12)
+// @name         🔥 1shop 出貨中控台 (V11.63 分批只對 7-11 + 預購改完全相符且不寫備註)
 // @namespace    http://tampermonkey.net/
-// @version      11.62.0
-// @description  V11.62 修兩個只有「大量＋跨頁」才會現形的漏單路徑,2026-09-07 用 85 筆分兩頁測出來。①階段 A 有跨頁迴圈,但階段 B(移分頁)與階段 C 的分流(autoSplitForToday)沒有 —— 兩者都用 getFreshRowById 找列,而那只掃當下顯示的那一頁。實測:「開始移動 10 筆到確認中」只「勾選 3/10 筆」卻仍印「✔ 批次移動完成」,7 筆沒被移走而且完全沒出聲;分流那邊 cvs 50 筆只勾到 38,12 筆印完「找不到訂單列」後就沒人再管,從此沒分流沒拋單沒標籤。修法:新增 foreachOrderByLivePage —— 不信任掃描當下記的 scanPage(到階段 B/C 時訂單已被移走一些、平台分頁會重排,頁碼過期),改為實際去每一頁找,而且每做完一次動作就回第 1 頁重掃(移走訂單會讓後面頁的往前遞補,只往後走會漏掉遞補上來的);跑完仍找不到的一律 warn+alert 列出訂單編號。②拋印批次上限 50 → 12(→ A 平台事實 P20):真正的瓶頸不在勾選而在平台列印 API,實測一次送 35 筆 order_ids 會回 502、標籤沒產生,而拋單那步是成功的。12 是 Tina 長期人工處理的安全值(伺服器出錯期間 12 最穩定,再多會一直失敗)。做成 localStorage 可調,因為確切門檻沒被量過也可能隨負載浮動。③doPrintAction 從 boolean 改回傳原因碼:舊版在「點了最終列印但預期的背景開頁沒發生」時照樣 return true,於是收尾對帳把那批算成拋到了 —— 2026-09-07 就是這樣,對帳說 71 筆只少 12 筆,那 38 筆「有單號沒標籤」的完全沒被算進去。這是最危險的組合:出貨清單看起來正常,倉庫卻沒標籤可貼。現在單獨列一類「拋單成功但標籤沒產生」,並註明只要重印不要重拋。基於 V11.61 兩件事,都是「別讓正常狀況長得像失敗」(紀律 4)。①背景開頁的等待上限舊版對所有批次寫死 25 秒,但耗時是隨筆數長的 —— 7-11 同一條路徑實測 4 筆 3.0 秒、4 筆 3.8 秒、9 筆 7.8 秒、50 筆 24.7 秒,50 筆離逾時只剩 0.3 秒。再慢一點就會印出「25 秒內沒收到背景開頁事件」,但標籤其實有產生,那正是 V11.58 花力氣消掉的假警報又長回來,而且是在最需要相信警告的大量出貨場合。改為 doPrintAction 多收 batchCount,上限 = min(90 秒, max(25 秒, 10 秒 + 筆數 x 0.7 秒)):下限釘 25 秒所以 9 筆以下與舊版完全相同(小量零回歸),50 筆放大到 45 秒(對 24.7 秒有 20 秒餘裕),上限封 90 秒避免真掛掉時無限等;並印出本批用了幾秒上限,方便之後累積樣本。②findNextPageBtn 回傳 null 時不分原因,呼叫端只能一律當異常 —— 於是每一輪正常掃完都印一行「⚠️ 找不到下一頁按鈕」再加 800 字 HTML dump,即使上一行才剛印過「父 li 有 .disabled,已是最後一頁」。新增 lastNextPageReason 區分 disabled(確定最後一頁,正常結束)與 not-found(結構可能變了,才該出聲),掃描呼叫端與診斷輸出同步分級。這兩行雜訊會讓「本輪零 warn」難以一眼判讀,警告區必須乾淨到「有東西出現就是真的有事」。基於 V11.60 修「重複單保留筆不會被拋單印標籤」:V11.39 把保留筆分到階段 C-1,只點「當天出貨」按鈕就結束,註解明寫「不拋印」。這個前提是錯的 —— 保留筆是今天真的要出的訂單,跟一般單一樣需要物流單號與標籤(2026-09-01 Tina 定版)。它以前看起來沒問題,是因為拋印迴圈是「分頁上有什麼列就勾什麼」(不照名單勾),保留筆若是超商會跟 NORMAL 超商單躺在同一個「已確認」分頁被順便掃走 —— 靠巧合不是設計。2026-09-01 踩到反例:5 筆出貨單中保留筆是宅配、NORMAL 一筆宅配都沒有 → runLogisticsByGroup 的 group 由 NORMAL 名單算出 → 宅配那條腿 group.length===0 → 整段跳過 → 那筆分流到「處理中」分頁後沒拋單沒標籤,貨出不去,而且只印一行資訊級「無訂單,跳過」,看 log 的人不會發現(紀律 4 的反面)。修法三件事:①階段 C-1／C-2 合併,保留筆併入同一份名單一起跑 runLogisticsByGroup(它第一步就是 autoSplitForToday,分流行為完全不變,差別只在後面不再中斷),進入條件從「NORMAL>0」改為「合計>0」以免只有保留筆時整段又被跳過。②新增收尾對帳:processOneCarrier 改為回傳實際處理到的訂單 id,runLogisticsByGroup 跑完比對「該拋的」與「實際拋到的」,有差額就 warn+toast+alert 並列出訂單編號 —— ①只堵住這一種組合,②才是通用防線,以後不管什麼原因漏拋都會被抓出來;另外會單獨點名「物流欄三家都對不上」的單。③「無訂單,跳過」改寫成「本輪出貨名單中無此物流」,講清楚判斷依據 —— 舊訊息會被讀成「平台上沒這家的單」。基於 V11.59 修一個藏很久的根因:document.querySelectorAll('tbody tr') 會同時抓到 1shop 的訂單表格「和中控台自己看板的表格」—— 看板每一列也有 <a href=".../shop/order/all/{id}"> 和 checkbox,跟平台列長得一模一樣。2026-08-26 用 51 筆跨頁測出來:拋印每批 50 筆的額度被自家看板列吃掉大半(已確認分頁 85 列 = 平台 34 + 看板 51),第 2 批剩下的 11 筆全是看板列 → 平台端 0 勾選 → 「更多批次功能」按鈕依 P6 不會渲染 → 兩行假警報。這次標籤沒漏印(第 1 批已涵蓋全部 34 張),但真實訂單超過 50 筆時就會變成真的漏印。修法:新增 platformRows() 排除 #v11-overlay 內的列,套用到拋印迴圈、getFreshRowById、全選、取消全選、掃描共 8 處。另修拋印失敗的訊息:舊版把「找不到按鈕(失敗)」印成「⏭ 跳過(已拋過或不適用)」,又把失敗筆算進「共拋 N 筆」;現在三種結果分開講,失敗筆單獨列清單。基於 V11.58:宅配的物流單確實會開在新分頁,但不走攔截器的三條路徑(form submit / window.open / a target=_blank),所以每輪都白等 25 秒再印一行「⚠️ 25 秒內沒收到背景開頁事件」。實測已確認那是誤報(A 平台事實 P15)。改為依物流商決定等待秒數:7-11 / 全家 預期走 window.open → 維持 25 秒,逾時升級為 warn(那才是真失敗);宅配已知不走 → 只給 3 秒寬限,逾時只留一行資訊。省 22 秒是附帶效果,主要目的是別再喊狼來了 —— 每輪都跳一個看起來像失敗的警告,久了會養成忽略警告區的習慣,真正的失敗訊號就被埋掉(紀律 4 的反面)。基於 V11.57:看了後台截圖才知道金流欄一格裡有三段(交易管道 + 金流狀態 + 附註),而且同一格可能同時出現兩個狀態字樣(實例「LINE Pay / ● 已付款 1 / 交易成功」)。V11.56 用精準比對,在那種格子上會全部落空 → 每一筆都被判「未收錄」→ 一筆都出不了貨。改為「包含比對 + 固定優先序」:已退款 > 付款失敗/交易逾時/交易取消 > 貨到付款/超商取貨時付款 > 交易成功/已付款 > 等待付款/待確認付款/未付款 > 未收錄。其中「貨到付款必須贏過等待付款」這層保護 V11.55 以前藏在 isUnpaid 的排除條件裡,改成包含比對後必須明確寫回來,否則所有貨到付款單都會被擋著並寄催繳信。另新增第 11 種狀態「已退款」:不出貨、不發信、寫備註移確認中(退款的錢已經還給客人,再寄催繳信是錯的)。判定只認金流狀態,永不比對交易管道(管道是開放清單,分期期數會變動)。基於 V11.56:①【最嚴重】「付款失敗/交易逾時/交易取消」三種狀態原本四個判定式全部落空,classifyOrders 掉到 else → 歸成「可出貨一般單」→ 被自動拋單出貨,也就是把貨寄給沒付錢的人(這三種狀態確實會出現在等待確認分頁)。修法:改用「可出貨白名單」,只有已付款/交易成功/貨到付款/超商取貨時付款算可出貨,其餘一律不出貨;未收錄的新狀態不出貨也不發信,並出聲提示。②判定只比對 .status-name(付款狀態欄還有天數/次數徽章,串接後永遠對不上)。③重複單改為單一情境判定 judgeDupGroup,規則收斂成一條:會成立的付款恰好 1 筆才保留並發信,其餘一切交客服 —— 修掉「兩筆都貨到付款/都刷卡成功卻自動取消一筆並寄信」與「看板顯示與實際行為相反」。④UNPAID_DUP 角色退役。基於 V11.55:①【根因】發信內文框指紋錯誤 —— 平台欄位是 body_code 不是 body,舊指紋永遠抓不到 → 主旨填得進、內文逾時 → 信框跳出來又自己關掉,信沒寄出(A 平台事實 P10)。②【靜默失敗】階段 A 沒接 processNoteForOrder / sendEmailForOrder 的回傳值,備註沒寫、信沒寄都只有 console warn,訂單照樣被移分頁出貨 → 改為失敗進清單、跳 toast、跑完彈 alert,且失敗筆不進階段 B/C。③【公版】popup 存的公版從來沒被讀取,使用者改了沒感覺 → 接上 getStoredTemplate 並拆重複單/未付款兩組;卡片編輯框只在真被改過時才覆寫(舊版永遠預填非空,把「取消筆不發信」閘門整條繞過)。④【死碼】dupRole 的 UNPAID_DUP / PENDING 從未被指派 → 補上實際條件,整組無成功筆時不再硬選 KEEP 寄出「已幫您取消」。基於 V11.54 分批拋印修正::「更多批次功能」按鈕是 1shop「有勾選訂單才由 Vue 渲染」的,V11.52 每批印後取消勾選(按鈕消失),第 2 批重新勾選後 Vue 需時間重繪按鈕,原本一次性 findBtnByText 常抓不到 → 第 2 批拋單/印單靜默跳過(第 1 批成功、第 2 批失敗)。修法:tryThrowAction / doPrintAction 找「更多批次功能」改為 waitFor 等待重試(4 秒),給 Vue 渲染時間。基於 V11.53 商品組合下拉透明統計
+// @version      11.63.0
+// @description  V11.63 三件事,都是 2026-09-14 那輪 57 筆跨頁測試的後續。①拋印批次上限從全域改成「每家自己一個」:7-11 = 12、全家／宅配 = 50(等於不分批)。V11.62 把 12 套到三家是過頭了 —— 502 只在 7-11(統一金流)那條列印 API 發生,全家走 1ship 每批 1.2 秒、宅配單批也沒事。多餘的分批不只是慢,還會製造假警報:全家只有 5 筆卻被拆成 12/12/8 三批,第 3 批那 8 列裡沒有全家單 → 平台不渲染最終列印按鈕 → 一行看起來像漏印的 warn,但 Tina 確認標籤實際 5 張一張沒少。②預購品不再由腳本寫備註(→ A 平台事實 P21):平台自己會寫「預購品處理中」,腳本再寫一次就變成同一筆兩行一樣的備註,Tina 之前是每輪手動把那 13~15 筆清掉。③依 P22 把「找不到印單按鈕」「找不到最終列印按鈕」從 warn 降級為資訊,並且**刻意不歸類為漏印** —— 某批列裡沒有該物流的單時找不到按鈕是正確行為,歸成失敗會製造假警報(紀律 4 的反面,與 T23「從 warn 推論而非實測」同一條教訓)。改為記次數,收尾明說「對帳驗的是拋單不是標籤,請比對標籤張數」,把判斷權交給看得到標籤的人。④預購判定改為「拆項＋完全相符」且只看商品欄:舊版是 product.includes(k) || allText.includes(k),而 allText 把顧客姓名、電話、物流、付款狀態全串在一起(且已含 product,前半段是多餘的)—— 客人名字裡有關鍵字就會被判成預購。新版把 product 依 '  /  ' 拆成一項一項(那是本檔 scrapeCurrentPage 自己組的分隔,不是平台格式,所以拆法確定),每一項格式是「[SKU] 商品名」,**SKU／品名／整項三者都比對**(一律完全相等)。⑤此版開發途中踩到一個坑並修掉:初版只比對品名與整項、漏了 SKU,而 Tina 的關鍵字填的正是 SKU(DK4Pro)→ 命中 0 筆 → 預購品會被當成一般單自動出貨。SKU 也是三者中最該用的,品名後面會串促銷文案(「【預購】熱銷補貨中,預計 10 月中旬…」),文案改了品名就變,SKU 不會。⑥預購關鍵字拆成兩組,各自對應一個目的分頁(暫存／其他),UI 從單行 input 改為兩個 textarea、一行一個關鍵字。分隔符也一併修:舊版的 /[,,]/ 是兩個半形逗號(U+002C 兩次),全形逗號從來沒被當成分隔符;新版 parseKws 優先用換行切(品名裡可能有逗號),整串沒換行時才退回逗號切以相容舊格式。舊的單一關鍵字欄位會依當時的「預購歸類目的地」自動搬進對應那一組。⑦重複單同時是預購品時改走 B 方案:分類優先序是「重複 > 預購」,所以那筆的 type 是 DUP、預購分支不會執行,而保留筆預設「不移動」是要留給階段 C 當天出貨的 —— 預購品的貨還沒到,出貨就是把還沒進的東西寄給客人。改為保留筆若 hasPreorder 則不出貨、不發信(那封信講「已幫您取消,只保留下訂成功的那筆」,對預購品是誤導)、改移到該品項的預購分頁;取消筆照常取消,重複判定本身保留。看板的 KEEP 標籤同步改成「🟡 保留筆含預購品 → 不出貨、不發信」,免得標籤與實際行為相反。因為「完全相符」只要差一個字就全部落空、而落空的後果是預購品被當成一般單自動出貨,所以每輪額外印一行「關鍵字 N 個(→暫存)＋N 個(→其他),命中 M 筆(暫存 x / 其他 y),命中的關鍵字:…」,其中同時是重複單的再單獨點名,0 命中時補一句提醒 —— 這條路徑沒有下游會替它出聲,只能在判定當下講。基於 V11.62 修兩個只有「大量＋跨頁」才會現形的漏單路徑,2026-09-07 用 85 筆分兩頁測出來。①階段 A 有跨頁迴圈,但階段 B(移分頁)與階段 C 的分流(autoSplitForToday)沒有 —— 兩者都用 getFreshRowById 找列,而那只掃當下顯示的那一頁。實測:「開始移動 10 筆到確認中」只「勾選 3/10 筆」卻仍印「✔ 批次移動完成」,7 筆沒被移走而且完全沒出聲;分流那邊 cvs 50 筆只勾到 38,12 筆印完「找不到訂單列」後就沒人再管,從此沒分流沒拋單沒標籤。修法:新增 foreachOrderByLivePage —— 不信任掃描當下記的 scanPage(到階段 B/C 時訂單已被移走一些、平台分頁會重排,頁碼過期),改為實際去每一頁找,而且每做完一次動作就回第 1 頁重掃(移走訂單會讓後面頁的往前遞補,只往後走會漏掉遞補上來的);跑完仍找不到的一律 warn+alert 列出訂單編號。②拋印批次上限 50 → 12(→ A 平台事實 P20):真正的瓶頸不在勾選而在平台列印 API,實測一次送 35 筆 order_ids 會回 502、標籤沒產生,而拋單那步是成功的。12 是 Tina 長期人工處理的安全值(伺服器出錯期間 12 最穩定,再多會一直失敗)。做成 localStorage 可調,因為確切門檻沒被量過也可能隨負載浮動。③doPrintAction 從 boolean 改回傳原因碼:舊版在「點了最終列印但預期的背景開頁沒發生」時照樣 return true,於是收尾對帳把那批算成拋到了 —— 2026-09-07 就是這樣,對帳說 71 筆只少 12 筆,那 38 筆「有單號沒標籤」的完全沒被算進去。這是最危險的組合:出貨清單看起來正常,倉庫卻沒標籤可貼。現在單獨列一類「拋單成功但標籤沒產生」,並註明只要重印不要重拋。基於 V11.61 兩件事,都是「別讓正常狀況長得像失敗」(紀律 4)。①背景開頁的等待上限舊版對所有批次寫死 25 秒,但耗時是隨筆數長的 —— 7-11 同一條路徑實測 4 筆 3.0 秒、4 筆 3.8 秒、9 筆 7.8 秒、50 筆 24.7 秒,50 筆離逾時只剩 0.3 秒。再慢一點就會印出「25 秒內沒收到背景開頁事件」,但標籤其實有產生,那正是 V11.58 花力氣消掉的假警報又長回來,而且是在最需要相信警告的大量出貨場合。改為 doPrintAction 多收 batchCount,上限 = min(90 秒, max(25 秒, 10 秒 + 筆數 x 0.7 秒)):下限釘 25 秒所以 9 筆以下與舊版完全相同(小量零回歸),50 筆放大到 45 秒(對 24.7 秒有 20 秒餘裕),上限封 90 秒避免真掛掉時無限等;並印出本批用了幾秒上限,方便之後累積樣本。②findNextPageBtn 回傳 null 時不分原因,呼叫端只能一律當異常 —— 於是每一輪正常掃完都印一行「⚠️ 找不到下一頁按鈕」再加 800 字 HTML dump,即使上一行才剛印過「父 li 有 .disabled,已是最後一頁」。新增 lastNextPageReason 區分 disabled(確定最後一頁,正常結束)與 not-found(結構可能變了,才該出聲),掃描呼叫端與診斷輸出同步分級。這兩行雜訊會讓「本輪零 warn」難以一眼判讀,警告區必須乾淨到「有東西出現就是真的有事」。基於 V11.60 修「重複單保留筆不會被拋單印標籤」:V11.39 把保留筆分到階段 C-1,只點「當天出貨」按鈕就結束,註解明寫「不拋印」。這個前提是錯的 —— 保留筆是今天真的要出的訂單,跟一般單一樣需要物流單號與標籤(2026-09-01 Tina 定版)。它以前看起來沒問題,是因為拋印迴圈是「分頁上有什麼列就勾什麼」(不照名單勾),保留筆若是超商會跟 NORMAL 超商單躺在同一個「已確認」分頁被順便掃走 —— 靠巧合不是設計。2026-09-01 踩到反例:5 筆出貨單中保留筆是宅配、NORMAL 一筆宅配都沒有 → runLogisticsByGroup 的 group 由 NORMAL 名單算出 → 宅配那條腿 group.length===0 → 整段跳過 → 那筆分流到「處理中」分頁後沒拋單沒標籤,貨出不去,而且只印一行資訊級「無訂單,跳過」,看 log 的人不會發現(紀律 4 的反面)。修法三件事:①階段 C-1／C-2 合併,保留筆併入同一份名單一起跑 runLogisticsByGroup(它第一步就是 autoSplitForToday,分流行為完全不變,差別只在後面不再中斷),進入條件從「NORMAL>0」改為「合計>0」以免只有保留筆時整段又被跳過。②新增收尾對帳:processOneCarrier 改為回傳實際處理到的訂單 id,runLogisticsByGroup 跑完比對「該拋的」與「實際拋到的」,有差額就 warn+toast+alert 並列出訂單編號 —— ①只堵住這一種組合,②才是通用防線,以後不管什麼原因漏拋都會被抓出來;另外會單獨點名「物流欄三家都對不上」的單。③「無訂單,跳過」改寫成「本輪出貨名單中無此物流」,講清楚判斷依據 —— 舊訊息會被讀成「平台上沒這家的單」。基於 V11.59 修一個藏很久的根因:document.querySelectorAll('tbody tr') 會同時抓到 1shop 的訂單表格「和中控台自己看板的表格」—— 看板每一列也有 <a href=".../shop/order/all/{id}"> 和 checkbox,跟平台列長得一模一樣。2026-08-26 用 51 筆跨頁測出來:拋印每批 50 筆的額度被自家看板列吃掉大半(已確認分頁 85 列 = 平台 34 + 看板 51),第 2 批剩下的 11 筆全是看板列 → 平台端 0 勾選 → 「更多批次功能」按鈕依 P6 不會渲染 → 兩行假警報。這次標籤沒漏印(第 1 批已涵蓋全部 34 張),但真實訂單超過 50 筆時就會變成真的漏印。修法:新增 platformRows() 排除 #v11-overlay 內的列,套用到拋印迴圈、getFreshRowById、全選、取消全選、掃描共 8 處。另修拋印失敗的訊息:舊版把「找不到按鈕(失敗)」印成「⏭ 跳過(已拋過或不適用)」,又把失敗筆算進「共拋 N 筆」;現在三種結果分開講,失敗筆單獨列清單。基於 V11.58:宅配的物流單確實會開在新分頁,但不走攔截器的三條路徑(form submit / window.open / a target=_blank),所以每輪都白等 25 秒再印一行「⚠️ 25 秒內沒收到背景開頁事件」。實測已確認那是誤報(A 平台事實 P15)。改為依物流商決定等待秒數:7-11 / 全家 預期走 window.open → 維持 25 秒,逾時升級為 warn(那才是真失敗);宅配已知不走 → 只給 3 秒寬限,逾時只留一行資訊。省 22 秒是附帶效果,主要目的是別再喊狼來了 —— 每輪都跳一個看起來像失敗的警告,久了會養成忽略警告區的習慣,真正的失敗訊號就被埋掉(紀律 4 的反面)。基於 V11.57:看了後台截圖才知道金流欄一格裡有三段(交易管道 + 金流狀態 + 附註),而且同一格可能同時出現兩個狀態字樣(實例「LINE Pay / ● 已付款 1 / 交易成功」)。V11.56 用精準比對,在那種格子上會全部落空 → 每一筆都被判「未收錄」→ 一筆都出不了貨。改為「包含比對 + 固定優先序」:已退款 > 付款失敗/交易逾時/交易取消 > 貨到付款/超商取貨時付款 > 交易成功/已付款 > 等待付款/待確認付款/未付款 > 未收錄。其中「貨到付款必須贏過等待付款」這層保護 V11.55 以前藏在 isUnpaid 的排除條件裡,改成包含比對後必須明確寫回來,否則所有貨到付款單都會被擋著並寄催繳信。另新增第 11 種狀態「已退款」:不出貨、不發信、寫備註移確認中(退款的錢已經還給客人,再寄催繳信是錯的)。判定只認金流狀態,永不比對交易管道(管道是開放清單,分期期數會變動)。基於 V11.56:①【最嚴重】「付款失敗/交易逾時/交易取消」三種狀態原本四個判定式全部落空,classifyOrders 掉到 else → 歸成「可出貨一般單」→ 被自動拋單出貨,也就是把貨寄給沒付錢的人(這三種狀態確實會出現在等待確認分頁)。修法:改用「可出貨白名單」,只有已付款/交易成功/貨到付款/超商取貨時付款算可出貨,其餘一律不出貨;未收錄的新狀態不出貨也不發信,並出聲提示。②判定只比對 .status-name(付款狀態欄還有天數/次數徽章,串接後永遠對不上)。③重複單改為單一情境判定 judgeDupGroup,規則收斂成一條:會成立的付款恰好 1 筆才保留並發信,其餘一切交客服 —— 修掉「兩筆都貨到付款/都刷卡成功卻自動取消一筆並寄信」與「看板顯示與實際行為相反」。④UNPAID_DUP 角色退役。基於 V11.55:①【根因】發信內文框指紋錯誤 —— 平台欄位是 body_code 不是 body,舊指紋永遠抓不到 → 主旨填得進、內文逾時 → 信框跳出來又自己關掉,信沒寄出(A 平台事實 P10)。②【靜默失敗】階段 A 沒接 processNoteForOrder / sendEmailForOrder 的回傳值,備註沒寫、信沒寄都只有 console warn,訂單照樣被移分頁出貨 → 改為失敗進清單、跳 toast、跑完彈 alert,且失敗筆不進階段 B/C。③【公版】popup 存的公版從來沒被讀取,使用者改了沒感覺 → 接上 getStoredTemplate 並拆重複單/未付款兩組;卡片編輯框只在真被改過時才覆寫(舊版永遠預填非空,把「取消筆不發信」閘門整條繞過)。④【死碼】dupRole 的 UNPAID_DUP / PENDING 從未被指派 → 補上實際條件,整組無成功筆時不再硬選 KEEP 寄出「已幫您取消」。基於 V11.54 分批拋印修正::「更多批次功能」按鈕是 1shop「有勾選訂單才由 Vue 渲染」的,V11.52 每批印後取消勾選(按鈕消失),第 2 批重新勾選後 Vue 需時間重繪按鈕,原本一次性 findBtnByText 常抓不到 → 第 2 批拋單/印單靜默跳過(第 1 批成功、第 2 批失敗)。修法:tryThrowAction / doPrintAction 找「更多批次功能」改為 waitFor 等待重試(4 秒),給 Vue 渲染時間。基於 V11.53 商品組合下拉透明統計
 // @author       Tina + Claude
 // @match        *://admin.1shop.tw/*
 // @run-at       document-idle
@@ -19,9 +19,15 @@
   // ============================================================
   //  ⓪ 全域常數 / 設定
   // ============================================================
-  const VERSION = 'V11.62';
+  const VERSION = 'V11.63';
   const LS = {
-    PRE_KWS: 'v11_preorder_kws',          // 預購關鍵字
+    PRE_KWS: 'v11_preorder_kws',          // 預購關鍵字(舊版單一欄位,V11.63 起只用於一次性搬移)
+    // ★ V11.63:預購關鍵字拆成兩組,各自對應一個目的分頁(→ E 檔 T31)
+    //   需求:「A 品項批次移暫存、B 品項批次移其他」。做成兩個欄位而不是
+    //   「一行寫 品名 => 分頁」的語法 —— 語法要記、打錯不會報錯只會靜默失效,
+    //   而這條路徑失效的後果是預購品被當成一般單出貨。
+    PRE_KWS_TEMP:  'v11_preorder_kws_temp',   // 命中 → 移「暫存」
+    PRE_KWS_OTHER: 'v11_preorder_kws_other',  // 命中 → 移「其他」
     SCAN_PAGES: 'v11_scan_pages',         // 深潛頁數
     BATCH_SUBJ: 'v11_batch_subj',         // 異常單公版主旨
     BATCH_BODY: 'v11_batch_body',         // 異常單公版內文
@@ -72,6 +78,9 @@
       shipTextMatch: ['7-11', '7-ELEVEN', '統一', '711'],
       afterThrowTab: '已確認',
       tabGroup: 'cvs',
+      // ★ V11.63:只有這家需要分批(→ A 平台事實 P20)。502 是統一金流那條列印 API 的問題,
+      //   12 是 Tina 長期人工處理的安全值。
+      batchSize: 12,
     },
     'fami': {
       label: '全家',
@@ -86,6 +95,11 @@
       shipTextMatch: ['全家', 'FamilyMart', 'FAMI'],
       afterThrowTab: '已確認',
       tabGroup: 'cvs',
+      // ★ V11.63:全家走 1ship,從來沒發生過 502(實測每批 1.2 秒完成)。
+      //   V11.62 把 12 套到三家是過頭了 —— 2026-09-14 全家 5 筆被拆成 12/12/8 三批,
+      //   第 3 批那 8 列裡沒有全家單 → 平台不渲染最終列印按鈕 → 一行假警報(→ P22)。
+      //   標籤實際 5 張全印出來,沒有漏,但那行 warn 磨的是警告區的可信度。
+      batchSize: 50,
     },
     'home': {
       label: '宅配',
@@ -102,6 +116,8 @@
       //   → 不要等滿 25 秒,也不要印警告。7-11 / 全家 不設此旗標(預設 true),維持原行為
       bgTabExpected: false,
       shipTextMatch: ['宅配', '新竹', 'HCT'],
+      // ★ V11.63:宅配也不分批,理由同全家 —— 走新竹物流,沒有 502 紀錄
+      batchSize: 50,
       afterThrowTab: '處理中',
       tabGroup: 'hct',
     },
@@ -893,6 +909,49 @@
     }, duration);
   }
 
+  /** ★ V11.63:預購關鍵字解析(→ E 檔 T31)
+   *  **優先用換行分隔。** 品名裡可能有逗號 —— 實例:
+   *  「【預購】熱銷補貨中，預計 10 月中旬，依訂單順序陸續出貨」裡就有兩個全形逗號,
+   *  用逗號切會把一個品名切成三段,「完全相符」永遠對不上。
+   *  只有「整串沒有換行」時才退回用逗號切,保留舊格式相容。
+   *  順帶修掉舊版的 `/[,,]/` —— 那個字元組是**兩個半形逗號**(U+002C 兩次),
+   *  全形逗號從來沒被當成分隔符,使用者打成全形整串就會變成一個關鍵字。
+   */
+  function parseKws(raw) {
+    const s = (raw || '').trim();
+    if (!s) return [];
+    const byLine = s.split(/\r?\n/).map(x => x.trim()).filter(Boolean);
+    if (byLine.length > 1) return byLine;
+    return s.split(/[,，、]/).map(x => x.trim()).filter(Boolean);
+  }
+
+  /** ★ V11.63:一筆訂單的預購判定(→ E 檔 T31)
+   *  product 是 scrapeCurrentPage 自己用 '  /  '(前後各兩空格)串起來的,
+   *  每一項格式是「[SKU] 商品名」—— 那是我們自己組的字串不是平台格式,所以拆法是確定的。
+   *
+   *  **三種比對對象都試,但一律「完全相等」不是「包含」:**
+   *    sku  = 中括號裡的型號(例如 DK4Pro)  ← 實務上最穩,Tina 用的就是這個
+   *    name = 去掉 [SKU] 前綴後的品名
+   *    item = 整項
+   *  2026-09-15 踩到的坑:V11.63 初版只比對 name 與 item,漏了 sku,
+   *  而關鍵字填的正是 SKU → 命中 0 筆 → **預購品會被當成一般單自動出貨**。
+   *  SKU 也是三者中最該用的:品名後面會串促銷文案(「【預購】熱銷補貨中,預計…」),文案改了品名就變,SKU 不會。
+   *
+   *  回傳 { kw, tab } 或 null。暫存組優先於其他組(同一個關鍵字重複填時的決勝規則)。
+   */
+  function judgePreorder(product, kwsTemp, kwsOther) {
+    const items = (product || '').split('  /  ').map(s => s.trim()).filter(Boolean);
+    for (const item of items) {
+      const m = item.match(/^\[([^\]]*)\]\s*/);
+      const sku  = m ? m[1].trim() : '';
+      const name = m ? item.slice(m[0].length).trim() : item;
+      const hit = (kws) => kws.find(k => k && (k === sku || k === name || k === item));
+      const a = hit(kwsTemp);  if (a) return { kw: a, tab: '暫存' };
+      const b = hit(kwsOther); if (b) return { kw: b, tab: '其他' };
+    }
+    return null;
+  }
+
   // ============================================================
   //  ⑤ UI 注入(主中控台 + 懸浮控制台)
   // ============================================================
@@ -900,6 +959,16 @@
     if ($('#v11-overlay')) return;
 
     const savedKws = Storage.get(LS.PRE_KWS, '');
+    // ★ V11.63:舊版單一關鍵字欄位 → 依當時的「預購歸類目的地」搬進對應那一組(只搬一次)
+    let savedKwsTemp  = Storage.get(LS.PRE_KWS_TEMP, '');
+    let savedKwsOther = Storage.get(LS.PRE_KWS_OTHER, '');
+    if (!savedKwsTemp && !savedKwsOther && savedKws) {
+      const legacyTab = Storage.get(LS.PREORDER_TAB, '暫存');
+      if (legacyTab === '其他') savedKwsOther = savedKws; else savedKwsTemp = savedKws;
+      Storage.set(LS.PRE_KWS_TEMP, savedKwsTemp);
+      Storage.set(LS.PRE_KWS_OTHER, savedKwsOther);
+      log(`[預購] 舊關鍵字已搬到「${legacyTab}」那一組:${JSON.stringify(savedKws)}`);
+    }
     const savedPages = Storage.get(LS.SCAN_PAGES, '1');
     const savedPreorderTab = Storage.get(LS.PREORDER_TAB, '暫存');
 
@@ -959,9 +1028,17 @@
           <button class="v11-fab-toggle" id="v11-fab-toggle">➖</button>
         </div>
         <div class="v11-fab-body" id="v11-fab-body">
-          <div class="v11-fab-label">預購關鍵字(逗號分隔)</div>
-          <input id="v11-kws" class="v11-fab-input"
-            placeholder="例如:DK4-BK, 7DS-PK, 預購" value="${savedKws.replace(/"/g, '&quot;')}">
+          <div class="v11-fab-label">預購關鍵字 → 移【暫存】(一行一個)</div>
+          <textarea id="v11-kws-temp" class="v11-fab-input" rows="3"
+            style="resize:vertical; font-family:monospace; line-height:1.5;"
+            placeholder="一行一個,建議填 SKU 型號&#10;例如:&#10;DK4Pro&#10;7DS-PK">${savedKwsTemp.replace(/</g, '&lt;')}</textarea>
+          <div class="v11-fab-label" style="margin-top:6px;">預購關鍵字 → 移【其他】(一行一個)</div>
+          <textarea id="v11-kws-other" class="v11-fab-input" rows="3"
+            style="resize:vertical; font-family:monospace; line-height:1.5;"
+            placeholder="一行一個,建議填 SKU 型號">${savedKwsOther.replace(/</g, '&lt;')}</textarea>
+          <div class="v11-fab-label" style="opacity:.75; font-size:11px; margin-top:4px;">
+            比對是「完全相符」不是包含。SKU、品名、整項都會比,填 SKU 最穩(品名會被促銷文案改動)。
+          </div>
           <div class="v11-fab-row">
             <div class="v11-fab-label">掃描深潛頁數:</div>
             <input id="v11-pages" class="v11-fab-input"
@@ -969,7 +1046,7 @@
               style="width:70px; text-align:center;">
           </div>
           <div class="v11-fab-row">
-            <div class="v11-fab-label">預購歸類目的地:</div>
+            <div class="v11-fab-label">預設目的地(人工改分類時用):</div>
             <select id="v11-preorder-tab" class="v11-fab-input" style="width:auto; flex:1; cursor:pointer;">
               <option value="暫存" ${savedPreorderTab === '暫存' ? 'selected' : ''}>暫存</option>
               <option value="其他" ${savedPreorderTab === '其他' ? 'selected' : ''}>其他</option>
@@ -1168,9 +1245,12 @@
   // ★ V11.42 移除「僅測試備註抓取」獨立按鈕和函式(除錯用途已完成,不再需要)
 
   async function startScan() {
-    const kws = $('#v11-kws').value.trim();
+    // ★ V11.63:兩組關鍵字,各自對應一個目的分頁(→ E 檔 T31)
+    const kwsTempRaw  = $('#v11-kws-temp').value;
+    const kwsOtherRaw = $('#v11-kws-other').value;
     const pages = parseInt($('#v11-pages').value || '1', 10);
-    Storage.set(LS.PRE_KWS, kws);
+    Storage.set(LS.PRE_KWS_TEMP, kwsTempRaw);
+    Storage.set(LS.PRE_KWS_OTHER, kwsOtherRaw);
     Storage.set(LS.SCAN_PAGES, String(pages));
 
     toast(`🤖 開始掃描,深潛 ${pages} 頁...`, 'info', 2500);
@@ -1180,7 +1260,9 @@
 
     try {
       allOrders = [];
-      const preKws = kws.split(/[,,]/).map(s => s.trim()).filter(Boolean);
+      // ★ V11.63:改用 parseKws(換行優先、逗號相容),並保留兩組
+      const preCfg = { temp: parseKws(kwsTempRaw), other: parseKws(kwsOtherRaw) };
+      const preKws = [...preCfg.temp, ...preCfg.other];   // 合併清單只用於統計與舊呼叫端
 
       // ★ V11.39 關鍵:多頁掃描前,先切回第 1 頁(用 angles-left 圖示按鈕)
       //   原因:如果上次操作後停在第 2 頁,depth=2 設定下程式還是會跑「第 1/2、2/2」標題,
@@ -1199,7 +1281,7 @@
         toast(`📄 掃描第 ${p}/${pages} 頁...`, 'info', 1500);
         log(`[掃描] ▶ 開始掃描第 ${p}/${pages} 頁`);
         await sleep(800);
-        const pageOrders = scrapeCurrentPage(preKws, p);
+        const pageOrders = scrapeCurrentPage(preCfg, p);   // ★ V11.63:改傳兩組關鍵字
         log(`[掃描] 第 ${p} 頁抓到 ${pageOrders.length} 筆訂單`);
 
         // ★ 立即 hover 抓備註內文(必須在頁面切換前完成,否則 DOM 會消失)
@@ -1239,6 +1321,25 @@
       classifyOrders(preKws);
 
       renderKanban();
+      // ★ V11.63:預購判定改成「完全相符」後,關鍵字只要差一個字就全部落空(→ E 檔 T31)。
+      //   落空的後果是預購品被當成一般單自動出貨 —— 把還沒到貨的東西寄出去。
+      //   所以每輪把「設了幾個關鍵字、命中幾筆、命中的是哪幾個」印出來,讓人一眼看得出對不對。
+      if (preKws.length > 0) {
+        const preHits = allOrders.filter(o => o.hasPreorder);
+        const hitKws = [...new Set(preHits.map(o => o.preHitKw).filter(Boolean))];
+        const nTemp = preHits.filter(o => o.preTargetTab === '暫存').length;
+        const nOther = preHits.filter(o => o.preTargetTab === '其他').length;
+        log(`[預購] 關鍵字 ${preCfg.temp.length} 個(→暫存)＋ ${preCfg.other.length} 個(→其他),命中 ${preHits.length} 筆(暫存 ${nTemp} / 其他 ${nOther})${hitKws.length ? `,命中的關鍵字:${hitKws.map(k => `「${k}」`).join('、')}` : ''}`);
+        // ★ V11.63:重複單會蓋過預購(分類優先序),那幾筆要單獨點名 —— 它們走的是 DUP 的路(→ E 檔 T32)
+        const dupPre = preHits.filter(o => o.type === 'DUP');
+        if (dupPre.length > 0) {
+          log(`[預購] 其中 ${dupPre.length} 筆同時是重複單,依 B 方案:保留筆不出貨不發信、取消筆照常取消 —— ${dupPre.map(o => `${o.id}(${o.dupRole || '?'})`).join(', ')}`);
+        }
+        if (preHits.length === 0) {
+          log(`[預購] 本輪 0 命中。若今天確實有預購品,請檢查關鍵字 —— 判定是「完全相符」不是包含,而且 SKU／品名／整項三者都會比。填 SKU(例如 DK4Pro)最穩`);
+        }
+      }
+
       // ★ V11.56 未收錄付款狀態彙總出聲:A 平台事實 P12 的清單不保證窮盡,
       //   平台新增狀態時第一次掃描就要讓使用者知道,而不是安靜地被歸成「不出貨」
       const unknownPays = allOrders.filter(o => o.payUnknown);
@@ -1265,7 +1366,7 @@ ${lines}
    *  td[0]=選取 / td[1]=訂單號+確認狀態 / td[2]=日期 / td[3]=客戶+電話+老顧客
    *  td[4]=商品 / td[5]=付款 / td[6]=物流 / td[7]=金額 / td[8]=備註圖示 / td[9]=操作
    */
-  function scrapeCurrentPage(preKws, pageNum = 1) {
+  function scrapeCurrentPage(preCfg, pageNum = 1) {   // ★ V11.63:preCfg = { temp:[], other:[] }
     // ★ V11.59:排除自家看板列。舊版重新掃描時,上一輪的看板還在 DOM 裡,
     //   理論上會把看板列當成訂單重複計算(實測未發生,但同一個根因,一併修掉)
     const rows = platformRows().filter(r => r.querySelector('a[href*="/shop/order/all/"]'));
@@ -1426,7 +1527,15 @@ ${lines}
       // 衍生屬性
       // ══════════════════════════════════════
       const allText = `${customer} ${phone} ${product} ${shipText} ${payStatus}`;
-      const hasPreorder = preKws.some(k => k && (product.includes(k) || allText.includes(k)));
+      // ★ V11.63:預購判定改為「拆項 + 完全相符」,只看商品欄,並依組別決定目的分頁(→ E 檔 T31)
+      //   舊版是 `product.includes(k) || allText.includes(k)`,兩個問題:
+      //   ① allText 把顧客姓名、電話、物流、付款狀態全串在一起 —— 客人名字裡有關鍵字就被判成預購
+      //      (而且 allText 已經含 product,前半段根本是多餘的)
+      //   ② 「含有」比對:關鍵字是某個品名的一部分時會誤中別的商品(例如 DK4 誤中 DK4Pro)
+      const preJudge = judgePreorder(product, preCfg?.temp || [], preCfg?.other || []);
+      const hasPreorder = !!preJudge;
+      const preHitKw = preJudge ? preJudge.kw : '';
+      const preTargetTab = preJudge ? preJudge.tab : '';
       const isExc = /EXC/i.test(id);
       const isOverseas = /香港|澳門|新加坡|馬來西亞|海外|Hong\s*Kong|Singapore/i.test(custTd?.innerText || '');
 
@@ -1439,6 +1548,8 @@ ${lines}
       return {
         id, phone, customer, amount, payStatus, payStatusName, payStatusRaw, shipText, shipShort, date,
         hasPreorder, isExc, isOverseas,
+        preHitKw,             // ★ V11.63:命中的是哪一個預購關鍵字,供掃描收尾對帳(→ E 檔 T31)
+        preTargetTab,         // ★ V11.63:命中哪一組就去哪一個分頁(暫存 / 其他)
         product, customerNote, merchantNote,
         comboLabel,           // ★ V11.44:短格式商品組合標籤,供 NORMAL 區組合過濾選單顯示
         hasCustomerNote, hasMerchantNote,
@@ -1891,8 +2002,14 @@ ${lines}
         applyDupKeepOrCancel(o);
       } else if (o.hasPreorder) {
         o.type = 'PREORDER';
-        o.rowNote = NOTE_TEMPLATES.PREORDER;     // ★ 不含日期
-        o.rowMoveTab = Storage.get(LS.PREORDER_TAB, '暫存');
+        // ★ V11.63:預購不寫備註(→ A 平台事實 P21)。
+        //   平台自己會對含預購品的訂單寫「預購品處理中」,腳本再寫一次就變成同一筆兩行一樣的備註。
+        //   舊值 NOTE_TEMPLATES.PREORDER 保留在常數表不刪 —— 那是版本血統,也留給人工分類時參考。
+        //   Tina 2026-09-14 前是每輪手動把這 13~15 筆的備註清掉,現在預設就不寫。
+        o.rowNote = '';
+        // ★ V11.63:命中哪一組關鍵字就去哪個分頁(→ E 檔 T31)。
+        //   人工把別的類型改成預購時沒有命中的關鍵字,退回下拉選的預設值。
+        o.rowMoveTab = o.preTargetTab || Storage.get(LS.PREORDER_TAB, '暫存');
         o.needEmail = false;
       } else if (o.isExc) {
         o.type = 'EXC';
@@ -2066,6 +2183,22 @@ ${lines}
     if (order.id === judged.keepId) {
       // 保留筆 → 發信通知客戶
       order.dupRole = 'KEEP';
+
+      // ★ V11.63:保留筆若含預購品 → 不出貨(→ E 檔 T32,2026-09-15 Tina 定版選 B 方案)
+      //   分類優先序是「重複 > 預購」(classifyOrders 是 if/else if),所以這筆的 type 是 DUP,
+      //   預購那條分支根本不會執行 —— hasPreorder 這個旗標在資料裡但沒人讀。
+      //   而保留筆預設「不移動」的用意是留給階段 C 當天出貨:
+      //   **預購品的貨還沒到,出貨就是把還沒進的東西寄給客人。**
+      //   B 方案只擋住「會出貨」那一步,重複判定本身保留(取消筆照樣取消)。
+      //   通知信也不寄 —— 那封信講的是「已幫您取消,只保留下訂成功的那筆」,
+      //   客人收到會以為馬上出貨,對預購品是誤導。改由客服在預購分頁一起處理。
+      if (order.hasPreorder) {
+        order.needEmail  = false;
+        order.rowNote    = '';
+        order.rowMoveTab = order.preTargetTab || Storage.get(LS.PREORDER_TAB, '暫存');
+        return;
+      }
+
       order.needEmail = true;
       order.rowNote = '';           // ★ 保留筆備註空白
       // ★ V11.41:預設「不移動」,保留筆留在等待確認分頁讓階段 C 自動分流當天出貨
@@ -2247,7 +2380,14 @@ ${lines}
         if (o.isExc)       extraTags += `<span class="v11-tag v11-tag-exc">🔵 EXC</span>`;
         if (o.isOverseas)  extraTags += `<span class="v11-tag v11-tag-os">✈️ 海外</span>`;
         // 重複單「留新砍舊」角色標籤(V11.39:KEEP 發信、CANCEL 不發信)
-        if (o.dupRole === 'KEEP')       extraTags += `<span class="v11-tag" style="background:#27ae60;color:#fff;">✅ 保留(發信通知)</span>`;
+        // ★ V11.63:保留筆含預購品時,標籤要講實話(→ E 檔 T32)。
+        //   上面已經有獨立的「🟡 預購」標籤,所以這個組合看板本來就看得見;
+        //   但舊標籤寫「保留(發信通知)」會與 B 方案的實際行為相反 —— 那種筆不出貨也不發信。
+        if (o.dupRole === 'KEEP') {
+          extraTags += o.hasPreorder
+            ? `<span class="v11-tag" style="background:#e67e22;color:#fff;">🟡 保留筆含預購品 → 不出貨、不發信</span>`
+            : `<span class="v11-tag" style="background:#27ae60;color:#fff;">✅ 保留(發信通知)</span>`;
+        }
         if (o.dupRole === 'CANCEL')     extraTags += `<span class="v11-tag" style="background:#c0392b;color:#fff;">❌ 取消(只備註)</span>`;
         if (o.dupRole === 'PENDING')    extraTags += `<span class="v11-tag" style="background:#f39c12;color:#fff;">⏸ 待客服判斷</span>`;
         // ★ V11.56:UNPAID_DUP 角色已退役(沒有任何情境會指派它),標籤一併移除
@@ -2825,7 +2965,20 @@ ${lines}`);
     //   而且只印一行資訊級「無訂單,跳過」,看 log 的人不會發現(紀律 4 的反面)。
     //   修法:保留筆併入同一份名單一起跑 runLogisticsByGroup —— 它第一步就是 autoSplitForToday,
     //   跟原本階段 C-1 做的是同一件事,所以分流行為完全不變,差別只在後面不再中斷。
-    const dupKeepOrders = (cleanByType.DUP || []).filter(o => o.dupRole === 'KEEP');
+    // ★ V11.63:保留筆只有「還留在等待確認」的才進當日出貨名單(→ E 檔 T33)
+    //   舊條件只問 `dupRole === 'KEEP'`,沒問「它還在不在等待確認分頁」。
+    //   2026-09-15 實測踩到:B 方案把「保留筆含預購品」移到「其他」之後,
+    //   階段 C 仍把它算進出貨名單 → 去等待確認找不到 → 對帳報「沒拋到 1 筆」+ 彈窗。
+    //   **貨沒有出錯**(那筆確實沒出、確實在「其他」),但那是假警報,會磨掉對帳的可信度。
+    //   這條路徑不只影響預購:V11.41 早就允許使用者人工把保留筆的 rowMoveTab 改成
+    //   已取消／確認中,那時階段 B 會真的移走 —— 同樣的假警報一直都在,只是沒人改過。
+    //   判準改為「rowMoveTab 是不移動(或空)」才留給階段 C,這同時涵蓋兩種情況。
+    const dupKeepAll = (cleanByType.DUP || []).filter(o => o.dupRole === 'KEEP');
+    const dupKeepOrders = dupKeepAll.filter(o => !o.rowMoveTab || o.rowMoveTab === '不移動');
+    const dupKeepMoved = dupKeepAll.filter(o => o.rowMoveTab && o.rowMoveTab !== '不移動');
+    if (dupKeepMoved.length > 0) {
+      log(`[階段 C] 保留筆有 ${dupKeepMoved.length} 筆已被階段 B 移走,不列入當日出貨:${dupKeepMoved.map(o => `${o.id}→${o.rowMoveTab}${o.hasPreorder ? '(含預購品)' : ''}`).join(', ')}`);
+    }
     const normalOrders = cleanByType.NORMAL || [];
     const shipTodayOrders = [...normalOrders, ...dupKeepOrders];   // ★ V11.60
     // ★ V11.60:進入條件從「NORMAL > 0」改為「合計 > 0」——
@@ -3430,6 +3583,7 @@ ${lines.join('\n')}`);
     const unmatched = which === 'all' ? orders.filter(o => !inScope.includes(o)) : [];
     const thrownAll = new Set();
     const noLabelAll = new Set();   // ★ V11.62:拋單成功但標籤沒產生的(→ E 檔 T29)
+    let noBtnTotal = 0;             // ★ V11.63:「這批沒找到列印按鈕」的總批數(→ A 平台事實 P22)
 
     for (const key of carriers) {
       const cfg = LOGISTICS[key];
@@ -3484,6 +3638,8 @@ ${lines.join('\n')}`);
       }
       // ★ V11.62:標籤沒產生的另外收 —— 這些「有拋到」但不算完成
       if (res && res.noLabelIds) res.noLabelIds.forEach(id => noLabelAll.add(id));
+      // ★ V11.63:「沒找到列印按鈕」的批數,收尾提醒用(→ A 平台事實 P22)
+      if (res && res.noBtnBatches) noBtnTotal += res.noBtnBatches;
 
       // ★ V11.40:不再等 PDF 下載完成(已改用背景分頁),只給短緩衝讓 toast 顯示完
       toast(`📂 ${cfg.label} 物流單已在背景分頁,切換下一家...`, 'info', 1500);
@@ -3519,6 +3675,12 @@ ${lines.join('\n')}`);
 ${lines.join('\n')}`);
     } else {
       log(`[對帳] ✔ 本輪應拋 ${inScope.length} 筆全部拋印到(實際處理 ${thrownAll.size} 筆,含分頁上的舊單)`);
+    }
+
+    // ★ V11.63:對帳只驗得到「有沒有被拋單」,驗不到「標籤有沒有真的印出來」(→ A 平台事實 P22)。
+    //   有批次找不到列印按鈕時明說一句,把判斷權交給看得到標籤的人 —— 不誇張成失敗,也不裝作沒事。
+    if (noBtnTotal > 0) {
+      log(`[對帳] 註:本輪有 ${noBtnTotal} 批沒找到列印按鈕,依 P22 通常是「那批列裡沒有該物流的單」(正常)。對帳驗的是拋單、不是標籤 —— 請順手比對一下標籤張數是否等於各家訂單數`);
     }
 
     Storage.del(LS.RESUME_FLAG);
@@ -3734,14 +3896,21 @@ ${lines.join('\n')}`);
     //   標籤沒產生 —— 而拋單那一步是成功的,訂單已經有物流單號,倉庫端看不出少了標籤。
     //   12 是 Tina 長期人工處理累積的安全值:「伺服器出錯的期間,一批 12 最穩定,再多會一直失敗」。
     //   代價是批次數變多(50 筆從 1 批變 5 批),拿時間換成功率 —— 這支腳本穩定性優先於速度。
-    const BATCH_SIZE = Number(Storage.get(LS.BATCH_SIZE, '12')) || 12;
-    log(`[${cfg.label}] 本輪拋印批次上限 ${BATCH_SIZE} 筆／批(→ A 平台事實 P20)`);
+    // ★ V11.63:改成「每家自己一個」(→ A 平台事實 P20、P22)。
+    //   V11.62 把 12 套到三家是過頭了:502 只在 7-11(統一金流)那條列印 API 發生,
+    //   全家走 1ship、宅配走新竹物流都沒有紀錄。多餘的分批不只是慢,還會製造假警報 ——
+    //   某一批的列裡沒有那家的單時,平台不渲染最終列印按鈕(P22),就印出一行看起來像漏印的 warn。
+    //   localStorage 的 v11_batch_size 仍可覆寫(設了就三家都用那個值),留給臨時狀況調整。
+    const batchOverride = Number(Storage.get(LS.BATCH_SIZE, '')) || 0;
+    const BATCH_SIZE = batchOverride || cfg.batchSize || 50;
+    log(`[${cfg.label}] 本輪拋印批次上限 ${BATCH_SIZE} 筆／批${batchOverride ? '(localStorage 覆寫)' : ''}(→ A 平台事實 P20)`);
     const MAX_ROUNDS = 60;           // 防呆:最多 60 輪
     let roundCount = 0;
     let pageCount = 1;
     const thrownIds = new Set();     // ★ V11.49:記住這輪已處理過的訂單 id(成敗都記,避免無限重試同一批)
     const failedIds = new Set();     // ★ V11.59:其中「拋單與印單都沒執行到」的,不可算進成功數(→ E 檔 T25)
     const noLabelIds = new Set();    // ★ V11.62:「拋單成功但標籤沒產生」的,要單獨報(→ E 檔 T29)
+    let noBtnBatches = 0;            // ★ V11.63:「這批沒找到列印按鈕」的批數 —— 通常是正常的(→ A 平台事實 P22)
 
     while (roundCount < MAX_ROUNDS) {
       roundCount++;
@@ -3836,6 +4005,12 @@ ${lines.join('\n')}`);
       if (throwCode === 'no-batch-btn' && !printOK) {
         batchIds.forEach(id => failedIds.add(id));
         warn(`[${cfg.label}] 本批 ${batchIds.length} 筆拋單與印單都沒執行到,已記入失敗清單`);
+      } else if (printCode === 'no-print-btn' || printCode === 'no-final-btn') {
+        // ★ V11.63:這兩種**刻意不歸類為失敗**(→ A 平台事實 P22)。
+        //   某一批的列裡沒有這家的單時,平台不渲染該家的按鈕 —— 找不到是正確行為。
+        //   歸成漏印會製造假警報,那是紀律 4 的反面(參考 T23:從 warn 推論而非實測)。
+        //   只記次數,收尾講清楚「要用標籤張數判斷」,把判斷權留給看得到標籤的人。
+        noBtnBatches++;
       } else if (printCode === 'no-bg-tab') {
         // ★ V11.62:最危險的組合 —— 拋單成功、標籤沒產生(→ A 平台事實 P20、E 檔 T29)
         //   訂單已經拿到物流單號,出貨清單上看起來一切正常,但倉庫沒有標籤可以貼。
@@ -3895,8 +4070,14 @@ ${lines.join('\n')}`);
     // ★ V11.60:回報給上層做收尾對帳(→ E 檔 T27)。
     //   以前這個函式什麼都不回傳,上層無從得知「該拋的到底拋到沒有」,
     //   所以漏拋只能靠人事後數標籤張數才會發現。
+    // ★ V11.63:「這批沒找到列印按鈕」單獨講,並明說判斷依據是標籤張數(→ A 平台事實 P22)
+    if (noBtnBatches > 0) {
+      log(`[${cfg.label}] 本輪有 ${noBtnBatches} 批沒找到列印按鈕 —— 依 P22 通常代表那幾批列裡沒有 ${cfg.label} 的單(正常)。**判斷真假只能看標籤張數**:${cfg.label} 應該印出的張數＝本輪該家的訂單數`);
+    }
+
     // ★ V11.62:多回 noLabelIds —— 對帳要分「沒拋到」與「拋了但沒標籤」兩種
-    return { thrownIds, failedIds, noLabelIds };
+    // ★ V11.63:多回 noBtnBatches —— 收尾對帳要提醒人去比對標籤張數
+    return { thrownIds, failedIds, noLabelIds, noBtnBatches };
   }
 
   /** 拋單階段:點「更多批次功能」→ 點該物流的拋單按鈕 → (宅配)確認 → 關閉結果
@@ -3988,7 +4169,10 @@ ${lines.join('\n')}`);
 
     const printBtn = findCarrierActionBtn(cfg.provider, cfg.printBtnText);
     if (!printBtn) {
-      warn(`[${cfg.label}] 找不到印單按鈕「${cfg.printBtnText.join('+')}」於「${cfg.provider}」section`);
+      // ★ V11.63 降級為資訊(→ A 平台事實 P22):某一批的列裡沒有這家的單時,
+      //   平台就不渲染該家的印單按鈕 —— 找不到是正確行為,不是失敗。
+      //   舊版一律 warn,分批時每輪都可能冒一行看起來像漏印的警告。
+      log(`[${cfg.label}] 本批找不到印單按鈕「${cfg.printBtnText.join('+')}」於「${cfg.provider}」section —— 依 P22 通常代表這批列裡沒有 ${cfg.label} 的單`);
       forceCloseAllModals();
       return 'no-print-btn';   // ★ V11.62:改回傳原因碼
     }
@@ -4057,7 +4241,11 @@ ${lines.join('\n')}`);
         await sleep(500);
       }
     } else {
-      warn(`[${cfg.label}] 找不到 modal 內可用的最終列印按鈕「${cfg.finalPrintBtn}」`);
+      // ★ V11.63 降級為資訊(→ A 平台事實 P22)。2026-09-14 實測:全家只有 5 筆卻被拆成
+      //   12／12／8 三批,第 3 批那 8 列裡沒有全家單 → 找不到「全家大宗B2C」→ 舊版印 warn。
+      //   但 Tina 確認標籤實際 5 張一張沒少 —— 那行 warn 是誤報。
+      //   判斷真假的唯一依據是標籤張數,不是這行訊息(與 T23 同一條紀律)。
+      log(`[${cfg.label}] 本批找不到最終列印按鈕「${cfg.finalPrintBtn}」 —— 依 P22 通常代表這批列裡沒有 ${cfg.label} 的單;若標籤張數對不上才是真的漏印`);
       forceCloseAllModals();
       return 'no-final-btn';   // ★ V11.62:改回傳原因碼
     }
