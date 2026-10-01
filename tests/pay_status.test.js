@@ -158,6 +158,51 @@ console.log('=== F. 舊資料相容 ===');
 eq(payGroup({ id: 'x', payStatus: '未付款 3' }), 'pending', 'payStatusRaw 缺失時退回 payStatus');
 eq(payGroup({ id: 'x' }), 'unknown', '完全沒有付款狀態 → unknown(擋下)');
 
+// ── G. 預購單的分類閘門(★ V11.64 → E 檔 T34)──
+//   classifyOrders 不純(吃 allOrders / Storage / DOM),切不出來直接測。
+//   但 V11.64 給它加的閘門就是 isPayable,而 isPayable 是從原始檔切出來的真貨 ——
+//   所以這一組測「付款分組 → 那筆預購單會不會留在預購分支」,
+//   再加一條結構斷言,防止那個條件哪天被改回去而沒人發現。
+console.log('=== G. 預購單的分類閘門(V11.64)===');
+eq(src.includes('o.hasPreorder && isPayable(o)'), true,
+   'classifyOrders 的預購分支必須要求付款已成立(條件被改回 o.hasPreorder 就會在這裡失敗)');
+// true  = 留在預購分支:不寫備註、移暫存/其他、不出貨、不發信
+// false = 往下掉:移「確認中」交人工(pending/dead 還會寄催繳信)
+const PRE_GATE = {
+  交易成功: true, 已付款: true,
+  貨到付款: true, 超商取貨時付款: true,   // 錢是到貨才收,不該被當成未付款去催
+  等待付款: false, 待確認付款: false, 未付款: false,
+  付款失敗: false, 交易逾時: false, 交易取消: false,
+  已退款: false,
+  神秘新狀態: false,
+};
+for (const [text, stays] of Object.entries(PRE_GATE)) {
+  eq(isPayable(O(text)), stays,
+     `預購品＋「${text}」${stays ? '應留在預購分支' : '應落到未付款/確認中那條'}`);
+}
+// 最貴的那一條單獨再釘一次:落空的後果是把還沒到貨的東西寄給客人
+eq(isPayable(O('信用卡 等待付款')), false,
+   '預購品＋信用卡等待付款(2026-09-22 實例 DK46092240650)不得留在預購分支');
+eq(isPayable(O('信用卡 已付款 1')), true,
+   '預購品＋信用卡已付款(2026-09-22 實例 GN6092238126)應留在預購分支');
+
+// ── H. EXC 未付款與 7-11 精準批次的結構防線(★ V11.65)──
+//   classifyOrders / processOneCarrier 都碰 DOM 與平台流程，無法在此純邏輯檔安全模擬；
+//   所以釘住兩個不可退化的入口：EXC 的未付款分支必須先於 EXC，7-11 必須啟用精準名單。
+console.log('=== H. EXC 未付款與 7-11 精準批次(V11.65) ===');
+const excUnpaidBranch = 'else if (o.isExc && !isPayable(o))';
+const excPaidBranch = 'else if (o.isExc) {';
+eq(src.includes(excUnpaidBranch), true,
+   'EXC 未付款必須有獨立 UNPAID 分支，不能直接落進 EXC');
+eq(src.indexOf(excUnpaidBranch) < src.indexOf(excPaidBranch), true,
+   'EXC 未付款分支必須先於付款成立的 EXC 分支（→ P23）');
+eq(src.includes('preciseBatching: true'), true,
+   '7-11 設定必須啟用精準名單分批（→ P22b）');
+eq(src.includes('targetIds.has(id)'), true,
+   '7-11 每批必須以本輪目標訂單 id 篩選，不能再耗用混合列額度');
+eq(src.includes('已停止且不自動重試;未驗證清單'), true,
+   '精準 7-11 批找不到列印入口時必須停止並列出未驗證清單');
+
 // ── 結果 ──
 console.log('');
 if (failures.length > 0) {
