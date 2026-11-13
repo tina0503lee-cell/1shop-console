@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         🔥 1shop 出貨中控台 (V11.65 EXC未付款＋7-11精準分批)
+// @name         🔥 1shop 出貨中控台 (V11.70 預購全選與模式按鈕)
 // @namespace    http://tampermonkey.net/
-// @version      11.65.0
-// @description  V11.65：EXC 訂單付款未成立時先走未付款流程；階段 A 改用即時跨頁尋列，避免分頁重排誤報；7-11 只勾本輪目標訂單、每 12 筆拋印，已知含 7-11 卻找不到列印入口即停止並列出未驗證訂單，不自動重試。全家與宅配維持既有整頁單批策略。
+// @version      11.70.0
+// @description  V11.70：已到貨預購候選看板加入全選／取消，並依模式顯示正確的正式執行按鈕；未改變授權、出貨或安全條件。
 // @author       Tina + Claude
 // @match        *://admin.1shop.tw/*
 // @run-at       document-idle
@@ -19,7 +19,9 @@
   // ============================================================
   //  ⓪ 全域常數 / 設定
   // ============================================================
-  const VERSION = 'V11.65';
+  const VERSION = 'V11.70';
+  // ★ V11.66:流程模式只存在記憶體。已到貨授權不可跨掃描、跨批次或重新整理沿用。
+  const FLOW_MODE = Object.freeze({ NORMAL: 'NORMAL', PREORDER_RELEASE: 'PREORDER_RELEASE' });
   const LS = {
     PRE_KWS: 'v11_preorder_kws',          // 預購關鍵字(舊版單一欄位,V11.63 起只用於一次性搬移)
     // ★ V11.63:預購關鍵字拆成兩組,各自對應一個目的分頁(→ E 檔 T31)
@@ -713,6 +715,8 @@
     .v11-card[data-type="EXC"]      { border-top-color: #3498db; }
     .v11-card[data-type="OVERSEAS"] { border-top-color: #9b59b6; }
     .v11-card[data-type="NORMAL"]   { border-top-color: #27ae60; }
+    /* ★ V11.68:已到貨預購沿用 NORMAL 卡片骨架，只用紫色頂框標示工作模式，避免看起來像另一套看板。 */
+    .v11-card[data-type="PREORDER_RELEASE"] { border-top-color: #8e44ad; }
 
     .v11-card-header { padding: 12px 16px; background: #fdfdfd; border-bottom: 1px solid #eee;
       display: flex; justify-content: space-between; align-items: center; font-size: 16px; font-weight: bold; color: #2c3e50; }
@@ -787,6 +791,11 @@
     .v11-tag-pre    { background: #f1c40f; color: #333; }
     .v11-tag-exc    { background: #3498db; color: #fff; }
     .v11-tag-os     { background: #9b59b6; color: #fff; }
+    /* ★ V11.68:預購候選專屬資訊收在既有訂單資訊欄，不能再拆成另一組表格欄位。 */
+    .v11-tag-release-source { background: #ecf0f1; color: #2c3e50; }
+    .v11-release-gate { background: #e8f5e9; border-left-color: #27ae60; color: #1e6b36; }
+    .v11-release-gate.is-blocked { background: #fce8e6; border-left-color: #c0392b; color: #a52714; }
+    .v11-release-preview-note { font-size: 12px; color: #7f8c8d; margin-right: auto; }
     .v11-history-tag { margin-top: 6px; padding: 4px 8px; font-size: 12px;
       background: #e74c3c; color: #fff; border-radius: 4px; display: inline-block; font-weight: bold; }
     .v11-history-tag a { color: #fff; text-decoration: underline; margin: 0 3px; }
@@ -955,6 +964,115 @@
     return null;
   }
 
+  /** ★ V11.66:只讀顧客留言「有無＋數量」,不讀留言全文。
+   *  平台已確認的穩定錨點是 svg[data-icon="messages"] 與外層「顧客留言(N)」文字；
+   *  data-v-* 是 Vue build 產物,不得拿來當 selector。
+   */
+  function parseCustomerMessage(root) {
+    const icon = root?.querySelector?.('svg[data-icon="messages"]');
+    if (!icon) return { hasCustomerMessage: false, customerMessageCount: 0 };
+    const holder = icon.closest('span, div, a, button') || icon.parentElement || root;
+    const text = (holder?.textContent || '').replace(/\s+/g, ' ').trim();
+    const m = text.match(/顧客留言\s*[（(]\s*(\d+)\s*[）)]/);
+    const count = m ? Number(m[1]) : null;
+    return { hasCustomerMessage: true, customerMessageCount: count };
+  }
+
+  /** ★ V11.67:一般出貨與已到貨預購必須顯示同一種只讀留言提醒，避免數量未知時其中一邊誤顯示 0 則。 */
+  function formatCustomerMessageReminder(order) {
+    if (!order?.hasCustomerMessage) return '';
+    return Number.isInteger(order.customerMessageCount)
+      ? `⚠ 顧客留言 ${order.customerMessageCount} 則`
+      : '⚠ 有顧客留言';
+  }
+
+  /** ★ V11.66:候選必須由「兩來源完整掃描集合」篩出,不能先過濾再做 duplicate grouping。 */
+  function getReleaseCandidates(orders) {
+    return (orders || []).filter(o => o.hasPreorder && (o.sourceTab === '暫存' || o.sourceTab === '其他'));
+  }
+
+  /** ★ V11.66:人工授權鍵必須包含來源,同 ID 出現在暫存／其他時不可互相擴張權限。 */
+  function releaseKey(sourceTab, orderId) {
+    return `${sourceTab || ''}::${String(orderId || '')}`;
+  }
+
+  /** ★ V11.66:本批解除預購只認人工勾選的來源＋ID；旗標不存 localStorage。 */
+  function applyReleaseAuthorization(orders, authorizedKeys) {
+    const keys = authorizedKeys instanceof Set ? authorizedKeys : new Set(authorizedKeys || []);
+    (orders || []).forEach(o => { o.preorderReleased = keys.has(releaseKey(o.sourceTab, o.id)); });
+    return orders;
+  }
+
+  function clearReleaseAuthorization(orders) {
+    (orders || []).forEach(o => { o.preorderReleased = false; });
+    return orders;
+  }
+
+  function groupReleaseOrdersBySource(orders) {
+    return (orders || []).reduce((acc, o) => {
+      if (o.sourceTab === '暫存' || o.sourceTab === '其他') (acc[o.sourceTab] = acc[o.sourceTab] || []).push(o);
+      return acc;
+    }, { 暫存: [], 其他: [] });
+  }
+
+  function isStrictBatchComplete(expectedIds, completedIds, problems = []) {
+    const expected = expectedIds instanceof Set ? expectedIds : new Set(expectedIds || []);
+    const completed = completedIds instanceof Set ? completedIds : new Set(completedIds || []);
+    return problems.length === 0 && [...expected].every(id => completed.has(id));
+  }
+
+  /** ★ V11.66:來源分流三集合必須互斥且完整覆蓋 expected,否則第一層閘門關閉。 */
+  function validateSplitResult(expectedOrders, result) {
+    const expected = new Set((expectedOrders || []).map(o => releaseKey(o.sourceTab, o.id)));
+    const buckets = {
+      success: (result?.success || []).map(x => typeof x === 'string' ? x : x.key),
+      failed: (result?.failed || []).map(x => typeof x === 'string' ? x : x.key),
+      notFound: (result?.notFound || []).map(x => typeof x === 'string' ? x : x.key),
+    };
+    const seen = new Map();
+    const problems = [];
+    for (const [bucket, keys] of Object.entries(buckets)) {
+      for (const key of keys) {
+        if (!key || !expected.has(key)) problems.push(`額外結果:${bucket}:${key || '(空)'}`);
+        const previous = seen.get(key);
+        if (previous) problems.push(`重複結果:${key}:${previous}+${bucket}`);
+        else seen.set(key, bucket);
+      }
+    }
+    for (const key of expected) if (!seen.has(key)) problems.push(`結果遺漏:${key}`);
+    return { ok: problems.length === 0, problems };
+  }
+
+  /** ★ V11.66:strict carrier 只有拋單狀態可接受且印單／標籤完成才算 completed。 */
+  function classifyStrictCarrierOutcome(throwCode, printCode) {
+    if (throwCode !== 'ok' && throwCode !== 'no-throw-btn') {
+      return { completed: false, reason: `拋單失敗:${throwCode || 'unknown'}` };
+    }
+    if (printCode !== 'ok') {
+      const reason = printCode === 'no-bg-tab' ? '標籤／物流單未完成' : `印單失敗:${printCode || 'unknown'}`;
+      return { completed: false, reason };
+    }
+    return { completed: true, reason: '' };
+  }
+
+  /** ★ V11.66:PREORDER_RELEASE 只有安全分類可進物流；留言只是提示,不構成阻擋。 */
+  function releaseBlockingReason(order) {
+    if (!order?.preorderReleased) return '未取得本批解除預購授權';
+    if (order.type === 'NORMAL') return '';
+    if (order.type === 'DUP' && order.dupRole === 'KEEP' && (!order.rowMoveTab || order.rowMoveTab === '不移動')) return '';
+    if (order.type === 'UNPAID') return order.payRefunded ? '已退款／不得出貨' : (order.payUnknown ? '付款狀態未知' : '付款未成立');
+    if (order.type === 'DUP') return `重複訂單 ${order.dupRole || 'PENDING'}／不得自動出貨`;
+    return `${order.type || '未知分類'}／不得進入正常出貨`;
+  }
+
+  function releaseCandidatePreviewReason(order) {
+    if (order.type === 'PREORDER') return '';
+    if (order.type === 'DUP' && order.dupRole === 'KEEP') return '';
+    if (order.type === 'UNPAID') return order.payRefunded ? '已退款' : (order.payUnknown ? '付款狀態未知' : '付款未成立');
+    if (order.type === 'DUP') return `重複訂單 ${order.dupRole || 'PENDING'}`;
+    return order.type === 'NORMAL' ? '' : `${order.type || '未知分類'} 需人工處理`;
+  }
+
   // ============================================================
   //  ⑤ UI 注入(主中控台 + 懸浮控制台)
   // ============================================================
@@ -1056,6 +1174,10 @@
             </select>
           </div>
           <button class="v11-fab-btn" id="v11-btn-scan">🤖 啟動大數據掃描</button>
+          <!-- ★ V11.66:獨立入口,不改變原「啟動大數據掃描」語意。候選沿用上方兩組關鍵字的聯集。 -->
+          <button class="v11-fab-btn" id="v11-btn-preorder-release-scan" style="background:#8e44ad;color:#fff;">
+            📦 已到貨預購出貨
+          </button>
           <button class="v11-fab-btn" id="v11-btn-open-kanban" style="background:#27ae60;color:#fff;font-weight:bold;">📋 開啟看板</button>
         </div>
       </div>
@@ -1133,6 +1255,7 @@
     };
 
     $('#v11-btn-scan').onclick = startScan;
+    $('#v11-btn-preorder-release-scan').onclick = startPreorderReleaseScan;
     $('#v11-btn-global').onclick = () =>
       withAutoUX('🌟 一鍵全局批次執行', () => runFullPipeline('global'));
     $('#v11-btn-only-logistics').onclick = () =>
@@ -1176,6 +1299,29 @@
   // ============================================================
   let allOrders = [];        // 掃描後的訂單陣列
   let currentSort = { col: 'date', dir: -1 };
+  // ★ V11.66:releaseKeys 用「來源::ID」識別本批人工授權；新掃描一律清空,永不持久化。
+  let currentFlowMode = FLOW_MODE.NORMAL;
+  let releaseKeys = new Set();
+  // ★ V11.69:候選看板的排序與勾選狀態只存在本次預購 session；絕不能排序 allOrders 或改變 releaseKeys 語意。
+  let preorderReleaseView = { candidates: null, selectedKeys: new Set(), sort: { col: null, dir: -1 } };
+
+  function resetPreorderReleaseSession() {
+    clearReleaseAuthorization(allOrders);
+    releaseKeys = new Set();
+    currentFlowMode = FLOW_MODE.NORMAL;
+    preorderReleaseView = { candidates: null, selectedKeys: new Set(), sort: { col: null, dir: -1 } };
+    $$('.v11-release-check:checked').forEach(cb => { cb.checked = false; });
+    syncFlowModeActionVisibility();
+  }
+
+  /** ★ V11.70:兩種模式的正式執行入口不可同時顯示；只改 visibility，不改任何 onclick 或 execution pipeline。 */
+  function syncFlowModeActionVisibility() {
+    const globalButton = $('#v11-btn-global');
+    const releaseButton = $('#v11-btn-run-preorder-release');
+    const isRelease = currentFlowMode === FLOW_MODE.PREORDER_RELEASE;
+    if (globalButton) globalButton.hidden = isRelease;
+    if (releaseButton) releaseButton.hidden = !isRelease;
+  }
 
   // ────────────────────────────────────────────────────────────
   // ★ V11.40 跨 sandbox 通訊:Page scope 攔截器派發 'v11-open-bg-tab' 事件
@@ -1248,6 +1394,8 @@
   // ★ V11.42 移除「僅測試備註抓取」獨立按鈕和函式(除錯用途已完成,不再需要)
 
   async function startScan() {
+    // ★ V11.66:原入口永遠回 NORMAL,避免上一批已到貨授權污染日常等待確認流程。
+    resetPreorderReleaseSession();
     // ★ V11.63:兩組關鍵字,各自對應一個目的分頁(→ E 檔 T31)
     const kwsTempRaw  = $('#v11-kws-temp').value;
     const kwsOtherRaw = $('#v11-kws-other').value;
@@ -1373,11 +1521,279 @@ ${lines}
     }
   }
 
+  /** ★ V11.66:明確切換來源分頁並驗證 active 名稱；失敗就停止,不可在錯的分頁找訂單。 */
+  async function switchToOrderTab(tabName) {
+    const btn = findTabButtonByText(tabName);
+    if (!btn) throw new Error(`找不到「${tabName}」分頁按鈕`);
+    if (!btn.classList.contains('active')) {
+      btn.click();
+      await sleep(3000);
+    }
+    const active = $$('.scroll-x.text-nowrap button.btn-link.active, .me-auto.scroll-x button.btn-link.active, button.btn-link.active')[0];
+    const activeName = (active?.textContent || '').replace(/\s+/g, '').trim();
+    if (!activeName.includes(tabName)) throw new Error(`切換「${tabName}」失敗,目前仍在「${activeName || '未知'}」`);
+  }
+
+  /** ★ V11.66:掃描單一來源的設定頁數；備註必須在換頁前抓完。 */
+  async function scanReleaseSource(tabName, pages, preCfg) {
+    await switchToOrderTab(tabName);
+    const first = await findFirstPageBtn();
+    if (first) { first.click(); await sleep(2500); }
+    const result = [];
+    for (let p = 1; p <= pages; p++) {
+      toast(`📄 已到貨掃描「${tabName}」第 ${p}/${pages} 頁`, 'info', 1200);
+      const pageOrders = scrapeCurrentPage(preCfg, p, tabName);
+      const noteOrders = pageOrders.filter(o => o.hasCustomerNote || o.hasMerchantNote);
+      if (noteOrders.length > 0) await fetchNotesFromHover(noteOrders);
+      result.push(...pageOrders);
+      if (p >= pages) break;
+      const next = findNextPageBtn();
+      if (!next) {
+        if (lastNextPageReason !== 'disabled') warn(`[已到貨掃描] 「${tabName}」第 ${p} 頁後無法確認是否還有下一頁`);
+        break;
+      }
+      next.click();
+      await sleep(2500);
+    }
+    return result;
+  }
+
+  async function collectPreorderReleaseOrders() {
+    const pages = Math.max(1, Math.min(30, parseInt($('#v11-pages').value || '1', 10) || 1));
+    const preCfg = {
+      temp: parseKws($('#v11-kws-temp').value),
+      other: parseKws($('#v11-kws-other').value),
+    };
+    const orders = [];
+    for (const tabName of ['暫存', '其他']) orders.push(...await scanReleaseSource(tabName, pages, preCfg));
+    return { orders, preCfg };
+  }
+
+  /** ★ V11.69:排序前收回目前 checkbox；這只是畫面 state，不會寫入 releaseKeys 或 order 資料。 */
+  function savePreorderReleaseViewSelections() {
+    const boxes = $$('.v11-release-check');
+    if (boxes.length === 0 || !preorderReleaseView.candidates) return;
+    boxes.forEach(cb => {
+      if (cb.checked) preorderReleaseView.selectedKeys.add(cb.dataset.key);
+      else preorderReleaseView.selectedKeys.delete(cb.dataset.key);
+    });
+  }
+
+  /** ★ V11.69:完全沿用 NORMAL 的欄位比較／首次降冪、再次升冪規則；只重排候選 view，不碰 allOrders。 */
+  function sortPreorderReleaseView(col) {
+    if (!preorderReleaseView.candidates) return;
+    savePreorderReleaseViewSelections();
+    if (preorderReleaseView.sort.col === col) preorderReleaseView.sort.dir = -preorderReleaseView.sort.dir;
+    else preorderReleaseView.sort = { col, dir: -1 };
+    preorderReleaseView.candidates.sort((a, b) => {
+      let va = a[col], vb = b[col];
+      if (col === 'amount') { va = parseFloat(va) || 0; vb = parseFloat(vb) || 0; }
+      if (va < vb) return -1 * preorderReleaseView.sort.dir;
+      if (va > vb) return 1 * preorderReleaseView.sort.dir;
+      return 0;
+    });
+    renderPreorderReleaseCandidates(preorderReleaseView.candidates);
+  }
+
+  /** ★ V11.70:表頭全選只操作本次候選的 selectedKeys；releaseKeys／preorderReleased 仍只在執行入口處處理。 */
+  function setPreorderReleaseViewSelection(checked) {
+    if (!preorderReleaseView.candidates) return;
+    preorderReleaseView.candidates.forEach(o => {
+      const key = releaseKey(o.sourceTab, o.id);
+      if (checked) preorderReleaseView.selectedKeys.add(key);
+      else preorderReleaseView.selectedKeys.delete(key);
+    });
+    renderPreorderReleaseCandidates(preorderReleaseView.candidates);
+  }
+
+  /** ★ V11.66:候選看板預設全選供人工排除；實際授權仍以執行當下勾選與重新安全檢查為準。 */
+  function renderPreorderReleaseCandidates(candidates) {
+    const container = $('#v11-cards-container');
+    if (!container) return;
+    if (candidates.length === 0) {
+      container.innerHTML = '<div style="padding:40px;text-align:center;color:#c0392b;">沒有符合目前商品／SKU 關鍵字的已到貨預購候選</div>';
+      return;
+    }
+    if (preorderReleaseView.candidates !== candidates) {
+      preorderReleaseView = {
+        candidates: [...candidates],
+        selectedKeys: new Set(candidates.map(o => releaseKey(o.sourceTab, o.id))),
+        sort: { col: null, dir: -1 },
+      };
+    }
+    const rows = candidates.map(o => {
+      // ★ V11.68:候選資料不變，只把顯示密度對齊 NORMAL 訂單資訊欄；授權／安全重檢仍留在既有預購流程。
+      const payG = payGroup(o);
+      const statusCls = payG === 'unknown'  ? 'v11-status-unknown'
+                      : payG === 'cod'      ? 'v11-status-cod'
+                      : payG === 'paid'     ? 'v11-status-paid'
+                      : payG === 'refunded' ? 'v11-status-fail'
+                      : payG === 'dead'     ? 'v11-status-fail'
+                      :                       'v11-status-unpaid';
+      const orderLink = `https://admin.1shop.tw/shop/order/all/${o.id}`;
+      const phoneLink = o.phone ? `https://admin.1shop.tw/shop/order/all?search=${o.phone}` : '#';
+      const dateDisp = o.date ? new Date(o.date).toLocaleString('zh-TW', {
+        hour12: false, month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit'
+      }) : '-';
+      const payUnknownTag = o.payUnknown
+        ? `<span class="v11-tag" style="background:#c0392b;color:#fff;">⚠️ 付款狀態未收錄,不出貨</span>`
+        : o.payRefunded
+        ? `<span class="v11-tag" style="background:#7f8c8d;color:#fff;">💸 已退款,不出貨不發信</span>`
+        : '';
+      let extraTags = `<span class="v11-tag v11-tag-pre">🟡 預購</span>`;
+      if (o.isExc) extraTags += `<span class="v11-tag v11-tag-exc">🔵 EXC</span>`;
+      if (o.isOverseas) extraTags += `<span class="v11-tag v11-tag-os">✈️ 海外</span>`;
+      if (o.dupRole === 'KEEP') extraTags += `<span class="v11-tag" style="background:#27ae60;color:#fff;">✅ 保留</span>`;
+      if (o.dupRole === 'CANCEL') extraTags += `<span class="v11-tag" style="background:#c0392b;color:#fff;">❌ 取消</span>`;
+      if (o.dupRole === 'PENDING') extraTags += `<span class="v11-tag" style="background:#f39c12;color:#fff;">⏸ 待客服判斷</span>`;
+      const relatedHtml = o.relatedOrders?.length
+        ? `<div class="v11-history-tag">🔁 同電話另 ${o.relatedOrders.length} 筆:` + o.relatedOrders.map(r =>
+          `<a href="https://admin.1shop.tw/shop/order/all?search=${r.id}" target="_blank">${escapeHTML(r.id)}</a>`
+        ).join('、') + `</div>` : '';
+      const customerNoteHtml = o.customerNote
+        ? `<div class="v11-note-box note-customer"><span class="note-icon">⚠️</span><span><b>顧客備註:</b>${escapeHTML(o.customerNote)}</span></div>` : '';
+      const merchantNoteHtml = o.merchantNote
+        ? `<div class="v11-note-box note-merchant"><span class="note-icon">⚠️</span><span><b>商家備註:</b>${escapeHTML(o.merchantNote)}</span></div>` : '';
+      const customerMessageReminder = formatCustomerMessageReminder(o);
+      const customerMessageHtml = customerMessageReminder
+        ? `<div class="v11-note-box note-customer"><span class="note-icon">⚠️</span><span>${customerMessageReminder}</span></div>` : '';
+      const previewBlock = releaseCandidatePreviewReason(o);
+      return `<tr data-order-id="${escapeAttr(o.id)}">
+        <td class="td-select"><input type="checkbox" class="v11-release-check" data-id="${escapeAttr(o.id)}" data-key="${escapeAttr(releaseKey(o.sourceTab, o.id))}" ${preorderReleaseView.selectedKeys.has(releaseKey(o.sourceTab, o.id)) ? 'checked' : ''} title="本批人工授權；取消後此筆不進 release authorization"></td>
+        <td class="td-info">
+          <div class="cust-name">${escapeHTML(o.customer || '-')}</div>
+          <a href="${orderLink}" target="_blank" class="ord-id">${escapeHTML(o.id)}</a>
+          ${o.phone ? `<a href="${phoneLink}" target="_blank" class="phone-link">🔍 反查: ${escapeHTML(o.phone)}</a>` : ''}
+          <div><span class="v11-tag v11-tag-release-source">來源：${escapeHTML(o.sourceTab || '-')}</span>${extraTags}</div>
+          ${payUnknownTag}${relatedHtml}${customerNoteHtml}${merchantNoteHtml}${customerMessageHtml}
+          ${previewBlock ? `<div class="v11-note-box v11-release-gate is-blocked"><span class="note-icon">⛔</span><span>暫不可出貨：${escapeHTML(previewBlock)}</span></div>` : ''}
+        </td>
+        <td class="td-status ${statusCls}">${escapeHTML(o.payStatus || '-')}</td>
+        <td class="td-product" title="${escapeAttr(o.product || '')}">${escapeHTML(o.comboLabel || o.product || '-')}</td>
+        <td class="td-ship"><span class="ship-badge">${escapeHTML(o.shipText || '-')}</span></td>
+        <td class="td-amount">$${escapeHTML(o.amount ?? '-')}</td>
+        <td class="td-date">${escapeHTML(dateDisp)}</td>
+      </tr>`;
+    }).join('');
+    container.innerHTML = `<div class="v11-card" data-type="PREORDER_RELEASE">
+      <div class="v11-card-header"><span>📦 已到貨預購出貨 <span style="font-weight:normal">共 ${candidates.length} 筆（預設全選，可取消例外）</span></span></div>
+      <div class="v11-card-body"><div class="v11-table-wrap"><table class="v11-table"><thead><tr>
+        <th class="th-select" width="6%"><div>選取</div><input type="checkbox" class="v11-release-check-all" ${candidates.every(o => preorderReleaseView.selectedKeys.has(releaseKey(o.sourceTab, o.id))) ? 'checked' : ''} title="本次預購候選全選／全取消"></th><th width="31%">訂單資訊</th><th width="10%">狀態</th><th width="18%">購買商品</th><th width="10%">物流 <span class="v11-sort" data-preorder-sort="shipText">⇅</span></th><th width="10%">金額 <span class="v11-sort" data-preorder-sort="amount">⇅</span></th><th width="15%">日期 <span class="v11-sort" data-preorder-sort="date">⇅</span></th>
+      </tr></thead><tbody>${rows}</tbody></table></div></div>
+      <div class="v11-card-footer"><span class="v11-release-preview-note">執行時會重新掃描並安全重檢；未勾選者不取得本批授權。</span><button class="v11-btn" id="v11-btn-run-preorder-release" style="background:#c0392b;">🚀 執行已勾選的已到貨預購</button></div>
+    </div>`;
+    $$('.v11-release-check').forEach(cb => {
+      cb.checked = preorderReleaseView.selectedKeys.has(cb.dataset.key);
+      cb.onchange = () => {
+        if (cb.checked) preorderReleaseView.selectedKeys.add(cb.dataset.key);
+        else preorderReleaseView.selectedKeys.delete(cb.dataset.key);
+      };
+    });
+    $$('.v11-release-check-all').forEach(cb => {
+      cb.checked = candidates.every(o => preorderReleaseView.selectedKeys.has(releaseKey(o.sourceTab, o.id)));
+      cb.onchange = () => setPreorderReleaseViewSelection(cb.checked);
+    });
+    $$('.v11-sort[data-preorder-sort]').forEach(sort => {
+      sort.onclick = () => sortPreorderReleaseView(sort.dataset.preorderSort);
+    });
+    $('#v11-btn-run-preorder-release').onclick = () => withAutoUX('📦 已到貨預購出貨', runPreorderRelease);
+    syncFlowModeActionVisibility();
+  }
+
+  async function startPreorderReleaseScan() {
+    resetPreorderReleaseSession();
+    currentFlowMode = FLOW_MODE.PREORDER_RELEASE;
+    syncFlowModeActionVisibility();
+    $('#v11-overlay').style.display = 'flex';
+    $('#v11-cards-container').innerHTML = '<div style="padding:40px;text-align:center;color:#8e44ad;">⏳ 正在完整掃描「暫存」與「其他」...</div>';
+    try {
+      const { orders, preCfg } = await collectPreorderReleaseOrders();
+      allOrders = orders;
+      await detectDuplicates();
+      classifyOrders([...preCfg.temp, ...preCfg.other]);
+      const candidates = getReleaseCandidates(allOrders);
+      renderPreorderReleaseCandidates(candidates);
+      toast(`✅ 已到貨候選掃描完成:${candidates.length} 筆`, 'success', 3500);
+    } catch (e) {
+      err('已到貨預購掃描失敗', e);
+      toast(`❌ 已到貨預購掃描失敗:${e.message}`, 'error', 6000);
+    }
+  }
+
+  async function runPreorderRelease() {
+    if (currentFlowMode !== FLOW_MODE.PREORDER_RELEASE) {
+      toast('目前不是已到貨預購模式,請重新從獨立入口掃描', 'warn', 4000);
+      return;
+    }
+    const selectedKeys = $$('.v11-release-check:checked').map(cb => cb.dataset.key);
+    if (selectedKeys.length === 0) { toast('沒有勾選任何已到貨預購訂單', 'warn'); return; }
+    if (!confirm(`將重新掃描並處理 ${selectedKeys.length} 筆已到貨預購訂單,確認繼續嗎?`)) return;
+    releaseKeys = new Set(selectedKeys);
+    try {
+      // 執行前重新完整掃描兩來源,duplicate 仍以完整集合建立,不是只看已勾候選。
+      const { orders, preCfg } = await collectPreorderReleaseOrders();
+      allOrders = orders;
+      await detectDuplicates();
+      applyReleaseAuthorization(allOrders, releaseKeys);
+      classifyOrders([...preCfg.temp, ...preCfg.other]);
+
+      const missing = selectedKeys.filter(key => !allOrders.some(o => releaseKey(o.sourceTab, o.id) === key));
+      if (missing.length) throw new Error(`重新掃描找不到 ${missing.length} 筆:${missing.join(', ')}`);
+      const selectedOrders = allOrders.filter(o => releaseKeys.has(releaseKey(o.sourceTab, o.id)));
+      const selectedIds = new Set(selectedOrders.map(o => o.id));
+      const crossSourceCollision = [...selectedIds].filter(id => {
+        const sources = new Set(allOrders.filter(o => o.id === id).map(o => o.sourceTab));
+        return sources.size > 1;
+      });
+      if (crossSourceCollision.length) {
+        throw new Error(`同一訂單 ID 同時存在多個來源,無法安全執行:${crossSourceCollision.join(', ')}`);
+      }
+      const noLongerCandidates = selectedOrders.filter(o => !o.hasPreorder);
+      if (noLongerCandidates.length) throw new Error(`重新掃描後已不符合商品／SKU 關鍵字:${noLongerCandidates.map(o => o.id).join(', ')}`);
+      const blocked = selectedOrders.map(o => ({ o, reason: releaseBlockingReason(o) })).filter(x => x.reason);
+      const shippable = selectedOrders.filter(o => !releaseBlockingReason(o));
+      if (blocked.length) {
+        const lines = blocked.map(x => `${x.o.id}(${x.o.sourceTab}):${x.reason}`).join('\n');
+        warn(`[已到貨預購] ${blocked.length} 筆安全檢查未通過,不進物流:\n${lines}`);
+        alert(`⚠️ 以下訂單未通過安全檢查,不會物流分流:\n\n${lines}`);
+      }
+      if (shippable.length === 0) throw new Error('本批沒有通過安全檢查、可進入物流的訂單');
+
+      const splitProblems = [];
+      const bySource = groupReleaseOrdersBySource(shippable);
+      for (const sourceTab of ['暫存', '其他']) {
+        const group = bySource[sourceTab];
+        if (!group.length) continue;
+        const result = await autoSplitForToday(group, { sourceTab, strict: true });
+        const reconciliation = validateSplitResult(group, result);
+        if (!reconciliation.ok) {
+          splitProblems.push(...reconciliation.problems.map(reason => ({ id: '(集合對帳)', sourceTab, reason })));
+        }
+        splitProblems.push(...result.notFound, ...result.failed);
+      }
+      if (splitProblems.length) {
+        const lines = splitProblems.map(x => `${x.id}(${x.sourceTab || '?'}):${x.reason}`).join('\n');
+        throw new Error(`來源分頁物流分流未全部完成:\n${lines}`);
+      }
+
+      const logisticsResult = await runLogisticsByGroup(shippable, 'all', { strictBatch: true, skipAutoSplit: true });
+      if (!logisticsResult?.success) throw new Error('物流拋印未完整完成,請依畫面失敗清單人工確認');
+      toast(`✅ 已到貨預購出貨完成:${shippable.length} 筆`, 'success', 5000);
+    } catch (e) {
+      err('已到貨預購出貨停止', e);
+      alert(`❌ 已到貨預購出貨已停止\n\n${e.message}\n\n未確認完成前不得視為成功。`);
+      toast(`❌ 已停止:${e.message}`, 'error', 7000);
+    } finally {
+      // ★ V11.66:成功或失敗都要求重新掃描／重新勾選,舊授權不得直接成為下一批授權。
+      resetPreorderReleaseSession();
+    }
+  }
+
   /** 抓取當前頁訂單資料(基於 1shop 真實 DOM 結構,V11.39 精準 td 索引版)
    *  td[0]=選取 / td[1]=訂單號+確認狀態 / td[2]=日期 / td[3]=客戶+電話+老顧客
    *  td[4]=商品 / td[5]=付款 / td[6]=物流 / td[7]=金額 / td[8]=備註圖示 / td[9]=操作
    */
-  function scrapeCurrentPage(preCfg, pageNum = 1) {   // ★ V11.63:preCfg = { temp:[], other:[] }
+  function scrapeCurrentPage(preCfg, pageNum = 1, sourceTab = '') {   // ★ V11.63:preCfg = { temp:[], other:[] }
     // ★ V11.59:排除自家看板列。舊版重新掃描時,上一輪的看板還在 DOM 裡,
     //   理論上會把看板列當成訂單重複計算(實測未發生,但同一個根因,一併修掉)
     const rows = platformRows().filter(r => r.querySelector('a[href*="/shop/order/all/"]'));
@@ -1533,6 +1949,8 @@ ${lines}
       // 備註內容只有 hover 才會載入(v-popper),掃描階段標「有/無」即可
       const customerNote = hasCustomerNote ? '【有顧客備註,請點開訂單查看】' : '';
       const merchantNote = hasMerchantNote ? '【有商家備註,請點開訂單查看】' : '';
+      // ★ V11.66:顧客留言可能和備註圖示同格或在訂單列其他位置；只取數量,不觸發內容讀取。
+      const { hasCustomerMessage, customerMessageCount } = parseCustomerMessage(tr);
 
       // ══════════════════════════════════════
       // 衍生屬性
@@ -1563,7 +1981,9 @@ ${lines}
         preTargetTab,         // ★ V11.63:命中哪一組就去哪一個分頁(暫存 / 其他)
         product, customerNote, merchantNote,
         comboLabel,           // ★ V11.44:短格式商品組合標籤,供 NORMAL 區組合過濾選單顯示
-        hasCustomerNote, hasMerchantNote,
+        hasCustomerNote, hasMerchantNote, hasCustomerMessage, customerMessageCount,
+        sourceTab,              // ★ V11.66:暫存／其他來源必須一路保留到原分頁分流
+        preorderReleased: false,
         loyaltyCount,         // 1shop 原生「老顧客」標籤的數字
         // ★ V11.39:網頁原生 .order-label 標籤
         webLoyaltyLabel, webDupLabel, webOverseasLabel,
@@ -2016,7 +2436,8 @@ ${lines}
         o.diagnostic = classifyDuplicateScenario(o);
         // 「留新砍舊」分流:只 KEEP 筆勾發信
         applyDupKeepOrCancel(o);
-      } else if (o.hasPreorder && isPayable(o)) {
+      // ★ V11.66:人工解除只跳過「仍待到貨」這一格；付款、退款、EXC、海外等後續規則照跑。
+      } else if (o.hasPreorder && !o.preorderReleased && isPayable(o)) {
         o.type = 'PREORDER';
         // ★ V11.64:預購要先「付款成立」才走這條(→ E 檔 T34)。
         //   舊版只看 hasPreorder,所以「預購品＋等待付款」一命中就定案 —— 不寫備註、
@@ -2242,7 +2663,8 @@ ${lines}
       //   B 方案只擋住「會出貨」那一步,重複判定本身保留(取消筆照樣取消)。
       //   通知信也不寄 —— 那封信講的是「已幫您取消,只保留下訂成功的那筆」,
       //   客人收到會以為馬上出貨,對預購品是誤導。改由客服在預購分頁一起處理。
-      if (order.hasPreorder) {
+      // ★ V11.66:DUP 的 KEEP 是另一個預購攔截點；本批已解除者不可再送回暫存／其他。
+      if (order.hasPreorder && !order.preorderReleased) {
         order.needEmail  = false;
         order.rowNote    = '';
         order.rowMoveTab = order.preTargetTab || Storage.get(LS.PREORDER_TAB, '暫存');
@@ -2412,6 +2834,11 @@ ${lines}
                <span class="note-icon">⚠️</span>
                <span><b>商家備註:</b>${escapeHTML(o.merchantNote)}</span>
              </div>` : '';
+        // ★ V11.67:留言只在掃描列上讀圖示／計數，這裡只作人工提醒；不參與 NORMAL 分類或出貨阻擋。
+        const customerMessageReminder = formatCustomerMessageReminder(o);
+        const customerMessageHtml = customerMessageReminder
+          ? `<div class="v11-note-box note-customer"><span class="note-icon">⚠️</span><span>${customerMessageReminder}</span></div>`
+          : '';
 
         // ── 反查結果框(綠色 OK / 紅色 NG)──
         const scanbackHtml = o.scanbackReason
@@ -2465,6 +2892,7 @@ ${lines}
               ${extraTags ? `<div>${extraTags}</div>` : ''}
               ${customerNoteHtml}
               ${merchantNoteHtml}
+              ${customerMessageHtml}
               ${scanbackHtml}
               ${relatedHtml}
               ${diagHtml}
@@ -3597,6 +4025,61 @@ ${lines.join('\n')}`);
   //  ⑬ 物流拋單與印單(三家完整 9 步驟自動化)
   // ============================================================
 
+  function collectStrictDestinationMatches(entries, rows, matchedKeys, mismatchedKeys) {
+    for (const tr of rows || []) {
+      const id = getOrderIdFromRow(tr);
+      if (!id) continue;
+      for (const entry of entries || []) {
+        if (entry.order.id !== id) continue;
+        const key = releaseKey(entry.order.sourceTab, entry.order.id);
+        if (rowMatchesCarrier(tr, entry.cfg)) matchedKeys.add(key);
+        else mismatchedKeys.add(key);
+      }
+    }
+  }
+
+  /** ★ V11.66:嚴格模式在任何印單前,先確認本批 ID＋carrier 已全部出現在預期目的分頁。 */
+  async function verifyStrictBatchDestinations(orders, carrierKeys) {
+    const problems = [];
+    const byTab = {};
+    for (const key of carrierKeys) {
+      const cfg = LOGISTICS[key];
+      const group = orders.filter(o => cfg.shipTextMatch.some(k => (o.shipText || '').includes(k)));
+      if (group.length) (byTab[cfg.afterThrowTab] = byTab[cfg.afterThrowTab] || []).push(...group.map(order => ({ order, cfg })));
+    }
+    for (const [tabName, entries] of Object.entries(byTab)) {
+      await switchToOrderTab(tabName);
+      const first = await findFirstPageBtn();
+      if (first) { first.click(); await sleep(2500); }
+      const matchedKeys = new Set();
+      const mismatchedKeys = new Set();
+      let paginationUncertain = false;
+      for (let page = 1; page <= 30; page++) {
+        collectStrictDestinationMatches(entries, platformRows(), matchedKeys, mismatchedKeys);
+        const next = findNextPageBtn();
+        if (!next) {
+          const allMatched = entries.every(({ order }) => matchedKeys.has(releaseKey(order.sourceTab, order.id)));
+          if (!allMatched && lastNextPageReason !== 'disabled') paginationUncertain = true;
+          break;
+        }
+        if (page === 30) { paginationUncertain = true; break; }
+        next.click();
+        await sleep(2500);
+      }
+      for (const { order } of entries) {
+        const key = releaseKey(order.sourceTab, order.id);
+        if (matchedKeys.has(key)) continue;
+        const reason = mismatchedKeys.has(key)
+          ? `分流後在「${tabName}」找到 ID,但實際 carrier 不符`
+          : paginationUncertain
+            ? `無法確認已完整掃描「${tabName}」,目的分頁狀態不確定`
+            : `分流後未出現在預期分頁「${tabName}」`;
+        problems.push({ key, id: order.id, sourceTab: order.sourceTab, reason });
+      }
+    }
+    return problems;
+  }
+
   /** 對一組訂單執行物流拋印,which: 'all' / '711' / 'fami' / 'home' */
   /** ★ V11.39 完整重寫:正確流程
    *    階段 1:在「等待確認」分頁,把訂單分組勾選後點對應的「當天出貨」快捷按鈕
@@ -3608,8 +4091,9 @@ ${lines.join('\n')}`);
    *           還在「已確認」→ 全家 拋單印單 → 等 PDF 下載
    *           切到「處理中」→ 宅配 拋單印單 → 等 PDF 下載
    */
-  async function runLogisticsByGroup(orders, which = 'all') {
-    if (orders.length === 0) return;
+  async function runLogisticsByGroup(orders, which = 'all', options = {}) {
+    if (orders.length === 0) return { success: true, missed: [] };
+    const strictBatch = options.strictBatch === true;
 
     Storage.set(LS.RESUME_FLAG, '1');
     Storage.setJson(LS.RESUME_PAYLOAD, { which, ids: orders.map(o => o.id), stage: 'start' });
@@ -3617,13 +4101,34 @@ ${lines.join('\n')}`);
     // ─────────────────────────────────────
     // 階段 1:自動分流當天出貨
     // ─────────────────────────────────────
-    await autoSplitForToday(orders);
-    await sleep(3000); // 等系統處理 + Vue 重渲染
+    if (!options.skipAutoSplit) {
+      await autoSplitForToday(orders);
+      await sleep(3000); // 等系統處理 + Vue 重渲染
+    }
 
     // ─────────────────────────────────────
     // 階段 2:逐家依分頁拋印
     // ─────────────────────────────────────
     const carriers = which === 'all' ? ['711', 'fami', 'home'] : [which];
+
+    if (strictBatch) {
+      const unrecognized = orders.filter(o => !carriers.some(key => LOGISTICS[key].shipTextMatch.some(k => (o.shipText || '').includes(k))));
+      if (unrecognized.length > 0) {
+        Storage.del(LS.RESUME_FLAG);
+        Storage.del(LS.RESUME_PAYLOAD);
+        warn(`[PREORDER_RELEASE] ${unrecognized.length} 筆物流無法辨識,尚未開始任何拋印:${unrecognized.map(o => `${o.id}(${o.shipText || '空白'})`).join(', ')}`);
+        return { success: false, unmatched: unrecognized };
+      }
+      const destinationProblems = await verifyStrictBatchDestinations(orders, carriers);
+      if (destinationProblems.length > 0) {
+        const lines = destinationProblems.map(x => `${x.id}(${x.sourceTab || '?'}):${x.reason}`).join('\n');
+        warn(`[PREORDER_RELEASE] 目的分頁預檢失敗,尚未開始任何拋印:\n${lines}`);
+        toast(`❌ ${destinationProblems.length} 筆未到預期分頁,不開始拋印`, 'error', 8000);
+        Storage.del(LS.RESUME_FLAG);
+        Storage.del(LS.RESUME_PAYLOAD);
+        return { success: false, missed: destinationProblems };
+      }
+    }
 
     // ★ V11.60:收尾對帳的基準(→ E 檔 T27)。
     //   inScope   = 這輪該被拋印的單(依 which 縮小範圍,使用者只選一家時不要誤報其他家)
@@ -3682,8 +4187,10 @@ ${lines.join('\n')}`);
       // 在分頁印單
       toast(`🚚 ${cfg.label} 印單中(${group.length} 筆)`, 'info', 2000);
       // ★ V11.60:收回這家實際處理到的 id,供收尾對帳(失敗筆不算,它們沒真的拋出去)
-      const res = await processOneCarrier(cfg, group);
-      if (res && res.thrownIds) {
+      const res = await processOneCarrier(cfg, group, { strictBatch });
+      if (strictBatch && res?.completedIds) {
+        res.completedIds.forEach(id => thrownAll.add(id));
+      } else if (res && res.thrownIds) {
         for (const id of res.thrownIds) {
           if (!res.failedIds || !res.failedIds.has(id)) thrownAll.add(id);
         }
@@ -3694,6 +4201,10 @@ ${lines.join('\n')}`);
       if (res && res.noBtnBatches) noBtnTotal += res.noBtnBatches;
 
       // ★ V11.40:不再等 PDF 下載完成(已改用背景分頁),只給短緩衝讓 toast 顯示完
+      if (strictBatch && res?.halted) {
+        warn(`[PREORDER_RELEASE] ${cfg.label} 未完整完成,停止後續 carrier`);
+        break;
+      }
       toast(`📂 ${cfg.label} 物流單已在背景分頁,切換下一家...`, 'info', 1500);
       await sleep(1500);
     }
@@ -3737,7 +4248,12 @@ ${lines.join('\n')}`);
 
     Storage.del(LS.RESUME_FLAG);
     Storage.del(LS.RESUME_PAYLOAD);
-    toast(`✅ 所有物流拋印完成`, 'success', 3000);
+    const completionProblems = [...missed, ...unmatched, ...noLabelInScope];
+    const success = strictBatch
+      ? isStrictBatchComplete(inScope.map(o => o.id), thrownAll, completionProblems)
+      : completionProblems.length === 0;
+    if (!strictBatch || success) toast(`✅ 所有物流拋印完成`, 'success', 3000);
+    return { success, missed, unmatched, noLabel: noLabelInScope };
   }
 
   /** 階段 1:自動分流當天出貨
@@ -3761,26 +4277,34 @@ ${lines.join('\n')}`);
     if (n === 0) log('  (沒有任何含「出貨/當天/當日」字樣的按鈕,可能不在「等待確認」分頁或 UI 結構不同)');
   }
 
-  async function autoSplitForToday(orders) {
+  async function autoSplitForToday(orders, options = {}) {
+    const sourceTab = options.sourceTab || '等待確認';
+    const strict = options.strict === true;
+    const splitResult = { success: [], notFound: [], failed: [] };
     toast(`🎯 開始自動分流當天出貨,共 ${orders.length} 筆`, 'info', 2500);
     await sleep(1000);
 
     // ★ V11.39 關鍵修法:先切回「等待確認」分頁
     //   1shop 「當天出貨」綠/紅按鈕只在「等待確認」分頁出現,
     //   階段 B 把 DUP CANCEL 移到「已取消」後 1shop 自動跳分頁,當前已不在「等待確認」
-    const waitingTabBtn = findTabButtonByText('等待確認');
+    // ★ V11.66:PREORDER_RELEASE 可指定原來源；NORMAL 沒傳參數時仍是「等待確認」。
+    const waitingTabBtn = findTabButtonByText(sourceTab);
     if (waitingTabBtn) {
       const isActive = waitingTabBtn.classList.contains('active');
       if (!isActive) {
-        log(`[autoSplit] 切回「等待確認」分頁(綠/紅按鈕只在此分頁)`);
-        toast(`📂 切回「等待確認」分頁`, 'info', 1500);
+        log(`[autoSplit] 切到來源「${sourceTab}」分頁`);
+        toast(`📂 切到來源「${sourceTab}」分頁`, 'info', 1500);
         waitingTabBtn.click();
         await sleep(3000); // 等 Vue 重渲染
       } else {
-        log(`[autoSplit] 已在「等待確認」分頁`);
+        log(`[autoSplit] 已在「${sourceTab}」分頁`);
       }
     } else {
-      warn(`[autoSplit] ⚠️ 找不到「等待確認」分頁按鈕,在當前分頁繼續`);
+      warn(`[autoSplit] ⚠️ 找不到「${sourceTab}」分頁按鈕`);
+      if (strict) {
+        splitResult.failed.push(...orders.map(o => ({ key: releaseKey(sourceTab, o.id), id: o.id, sourceTab, reason: `找不到來源分頁「${sourceTab}」` })));
+        return splitResult;
+      }
     }
 
     // cvs (7-11+全家) 訂單
@@ -3828,9 +4352,9 @@ ${lines.join('\n')}`);
       }
       log(`[autoSplit] ${cfg.kind} 本頁勾選 ${checked}/${pageOrders.length} 筆`);
 
-      if (checked === 0) {
-        warn(`[autoSplit] ${cfg.kind} 本頁一筆都沒勾到,跳過這一頁`);
-        return;
+      if (checked === 0 || (strict && checked !== pageOrders.length)) {
+        warn(`[autoSplit] ${cfg.kind} 本頁只勾到 ${checked}/${pageOrders.length} 筆,本批不視為完成`);
+        return false;
       }
 
       // ★ V11.39:勾選後等 1.5 秒讓 1shop 工具列「當天出貨」按鈕渲染出來
@@ -3847,15 +4371,19 @@ ${lines.join('\n')}`);
         await sleep(2000);
         const cb = await waitFor(() => findModalConfirmBtn(), 2500);
         if (cb) { log(`點確認彈窗:「${cb.textContent.trim()}」`); cb.click(); await sleep(1500); }
+        await sleep(2500);
+        return true;
       } else if (typeof W.bulk_action === 'function') {
         log(`找不到「${cfg.label}當天出貨」按鈕,fallback 呼叫 bulk_action`);
-        try { W.bulk_action(cfg.bulkAction); } catch (e) { warn(e); }
+        try { W.bulk_action(cfg.bulkAction); } catch (e) { warn(e); return false; }
         await sleep(2000);
+        await sleep(2500);
+        return true;
       } else {
         warn(`找不到「${cfg.label}當天出貨」按鈕,也沒 bulk_action 函式`);
         diagShipBtns();
+        return false;
       }
-      await sleep(2500);
     }
 
     // ─ 逐組跨頁分流(A. 超商 cvs / B. 宅配 hct)─
@@ -3865,11 +4393,14 @@ ${lines.join('\n')}`);
       toast(`${cfg.emoji} ${cfg.label}當天出貨 ${group.length} 筆`, 'info', 2000);
 
       const missing = await foreachOrderByLivePage(group, async (pageOrders) => {
-        await splitGroupOnCurrentPage(pageOrders, cfg);
+        const ok = await splitGroupOnCurrentPage(pageOrders, cfg);
+        if (ok) splitResult.success.push(...pageOrders.map(o => releaseKey(sourceTab, o.id)));
+        else splitResult.failed.push(...pageOrders.map(o => ({ key: releaseKey(sourceTab, o.id), id: o.id, sourceTab, reason: `${cfg.label}當天出貨操作未確認完成` })));
       }, `autoSplit-${cfg.kind}`);
 
       if (missing.length > 0) {
         splitMissing.push(...missing.map(o => `${o.id}(${cfg.label})`));
+        splitResult.notFound.push(...missing.map(o => ({ key: releaseKey(sourceTab, o.id), id: o.id, sourceTab, reason: `掃遍「${sourceTab}」所有分頁仍找不到` })));
         warn(`[autoSplit] ⚠️ ${cfg.kind} 有 ${missing.length} 筆掃遍所有分頁都找不到,沒有分流:${missing.map(o => o.id).join(', ')}`);
       } else {
         log(`[autoSplit] ✔ ${cfg.kind} ${group.length} 筆全部分流完成`);
@@ -3883,7 +4414,8 @@ ${lines.join('\n')}`);
       toast(`⚠️ ${splitMissing.length} 筆沒分流到,收尾對帳會再列一次`, 'warn', 7000);
     }
 
-    toast(`✅ 自動分流完成`, 'success', 2000);
+    if (!strict || (splitResult.notFound.length === 0 && splitResult.failed.length === 0)) toast(`✅ 自動分流完成`, 'success', 2000);
+    return splitResult;
   }
 
   /** ★ V11.39 簡化版:只做「印單」流程
@@ -3897,7 +4429,24 @@ ${lines.join('\n')}`);
    *    4) 列印視窗最終按鈕 → 觸發 PDF 下載
    *    5) 關閉列印視窗
    */
-  async function processOneCarrier(cfg, group) {
+  function rowMatchesCarrier(tr, cfg) {
+    const tds = tr ? $$('td', tr) : [];
+    const shipText = (tds[6]?.innerText || tds[6]?.textContent || '').trim();
+    return cfg.shipTextMatch.some(k => shipText.includes(k));
+  }
+
+  /** ★ V11.66:將拋印列篩選集中成可測純邊界；嚴格模式同時要求 batch ID 與 carrier 相符。 */
+  function filterCarrierBatchRows(rows, cfg, thrownIds, targetIds, strictBatch) {
+    return (rows || []).filter(tr => {
+      const id = getOrderIdFromRow(tr);
+      if (!id || thrownIds.has(id)) return false;
+      if (targetIds && !targetIds.has(id)) return false;
+      if (strictBatch && !rowMatchesCarrier(tr, cfg)) return false;
+      return !!tr.querySelector('input[type="checkbox"]');
+    });
+  }
+
+  async function processOneCarrier(cfg, group, options = {}) {
     // ★ V11.39 需求 B:不再依「中控台勾選的 group」處理,改為:
     //   1. 切到該物流對應分頁(7-11/全家→已確認 / 宅配→處理中)
     //   2. 從該分頁第 1 頁開始,逐頁:全選當前頁所有訂單 → 拋單(自適應)→ 印單 → 等 PDF → 下一頁
@@ -3957,14 +4506,20 @@ ${lines.join('\n')}`);
     //   localStorage 的 v11_batch_size 仍可覆寫(設了就三家都用那個值),留給臨時狀況調整。
     const batchOverride = Number(Storage.get(LS.BATCH_SIZE, '')) || 0;
     const BATCH_SIZE = batchOverride || cfg.batchSize || 50;
-    const preciseBatching = cfg.preciseBatching === true;
+    // ★ V11.66:嚴格白名單只由 PREORDER_RELEASE 顯式傳入；NORMAL 的全家／宅配仍維持整頁策略。
+    const strictReleaseBatch = options.strictBatch === true;
+    const preciseBatching = cfg.preciseBatching === true || strictReleaseBatch;
     const targetIds = preciseBatching ? new Set((group || []).map(o => o.id)) : null;
     log(`[${cfg.label}] 本輪拋印批次上限 ${BATCH_SIZE} 筆／批${batchOverride ? '(localStorage 覆寫)' : ''}(→ A 平台事實 P20)`);
-    if (preciseBatching) log(`[${cfg.label}] ★ V11.65 精準名單 ${targetIds.size} 筆:只勾本輪 7-11 訂單(→ A 平台事實 P22b)`);
+    if (preciseBatching) {
+      const reason = strictReleaseBatch ? '★ V11.66 PREORDER_RELEASE 嚴格批次' : '★ V11.65 7-11 精準名單(→ A 平台事實 P22b)';
+      log(`[${cfg.label}] ${reason} ${targetIds.size} 筆:只勾本輪目標 ID 且物流相符的訂單`);
+    }
     const MAX_ROUNDS = 60;           // 防呆:最多 60 輪
     let roundCount = 0;
     let pageCount = 1;
     const thrownIds = new Set();     // ★ V11.49:記住這輪已處理過的訂單 id(成敗都記,避免無限重試同一批)
+    const completedIds = new Set();   // ★ V11.66:strict 模式只有拋單＋印單／標籤條件皆完成才加入
     const failedIds = new Set();     // ★ V11.59:其中「拋單與印單都沒執行到」的,不可算進成功數(→ E 檔 T25)
     const noLabelIds = new Set();    // ★ V11.62:「拋單成功但標籤沒產生」的,要單獨報(→ E 檔 T29)
     let noBtnBatches = 0;            // ★ V11.63:「這批沒找到列印按鈕」的批數 —— 通常是正常的(→ A 平台事實 P22)
@@ -3981,12 +4536,7 @@ ${lines.join('\n')}`);
       }
 
       // 3-2) ★ V11.50:直接掃全部列,挑「有 checkbox 且還沒拋過」的(不靠 thead 全選)
-      const unthrownRows = rows.filter(tr => {
-        const id = getOrderIdFromRow(tr);
-        if (!id || thrownIds.has(id)) return false;
-        if (preciseBatching && !targetIds.has(id)) return false;
-        return !!tr.querySelector('input[type="checkbox"]');
-      });
+      const unthrownRows = filterCarrierBatchRows(rows, cfg, thrownIds, targetIds, strictReleaseBatch);
       log(`[${cfg.label}] 第 ${pageCount} 頁 ${rows.length} 列,未拋過 ${unthrownRows.length} 筆(累計已拋 ${thrownIds.size})`);
 
       // 3-3) 本頁沒有未拋的了 → 嘗試翻下一頁(多頁情境),沒有下一頁就結束
@@ -4060,8 +4610,18 @@ ${lines.join('\n')}`);
 
       // 3-7) 把這批加入已處理 Set(不論成敗都記,避免無限重試同一批)
       batchIds.forEach(id => thrownIds.add(id));
-      // ★ V11.59:拋單與印單「都」沒執行到 → 這批是真的失敗,單獨記下來不算進成功數
-      if (throwCode === 'no-batch-btn' && !printOK) {
+      if (strictReleaseBatch) {
+        const outcome = classifyStrictCarrierOutcome(throwCode, printCode);
+        if (outcome.completed) {
+          batchIds.forEach(id => completedIds.add(id));
+        } else {
+          batchIds.forEach(id => failedIds.add(id));
+          if (printCode === 'no-bg-tab') batchIds.forEach(id => noLabelIds.add(id));
+          halted = true;
+          warn(`[${cfg.label}] ⚠️ strict batch 未完成:${outcome.reason};未完成清單:${batchIds.join(', ')}`);
+        }
+      // ★ V11.59:以下保留 NORMAL／V11.65 的既有判定語意。
+      } else if (throwCode === 'no-batch-btn' && !printOK) {
         batchIds.forEach(id => failedIds.add(id));
         warn(`[${cfg.label}] 本批 ${batchIds.length} 筆拋單與印單都沒執行到,已記入失敗清單`);
       } else if (printCode === 'no-print-btn' || printCode === 'no-final-btn') {
@@ -4074,7 +4634,7 @@ ${lines.join('\n')}`);
           // ★ V11.65:P22b。這批每一筆都是精準找到的 7-11,不能再當成「本批沒 7-11」正常略過。
           batchIds.forEach(id => failedIds.add(id));
           halted = true;
-          warn(`[${cfg.label}] ⚠️ 精準 7-11 批 ${batchIds.length} 筆找不到列印入口,已停止且不自動重試;未驗證清單:${batchIds.join(', ')}`);
+          warn(`[${cfg.label}] ⚠️ 精準物流批 ${batchIds.length} 筆找不到列印入口,已停止且不自動重試;未驗證清單:${batchIds.join(', ')}`);
         }
       } else if (printCode === 'no-bg-tab') {
         // ★ V11.62:最危險的組合 —— 拋單成功、標籤沒產生(→ A 平台事實 P20、E 檔 T29)
@@ -4105,7 +4665,7 @@ ${lines.join('\n')}`);
       await sleep(500);
 
       if (halted) {
-        log(`[${cfg.label}] 已因精準 7-11 批未取得列印入口停止後續批次,保留未驗證清單供人工處理`);
+        log(`[${cfg.label}] 已因精準物流批未取得列印入口停止後續批次,保留未驗證清單供人工處理`);
         break;
       }
 
@@ -4124,7 +4684,7 @@ ${lines.join('\n')}`);
       const unseen = [...targetIds].filter(id => !thrownIds.has(id));
       if (unseen.length > 0) {
         unseen.forEach(id => failedIds.add(id));
-        warn(`[${cfg.label}] ⚠️ 精準 7-11 名單仍有 ${unseen.length} 筆未在目標分頁找到,未拋印:${unseen.join(', ')}`);
+        warn(`[${cfg.label}] ⚠️ 精準物流名單仍有 ${unseen.length} 筆未在目標分頁找到,未拋印:${unseen.join(', ')}`);
       }
     }
 
@@ -4158,7 +4718,7 @@ ${lines.join('\n')}`);
 
     // ★ V11.62:多回 noLabelIds —— 對帳要分「沒拋到」與「拋了但沒標籤」兩種
     // ★ V11.63:多回 noBtnBatches —— 收尾對帳要提醒人去比對標籤張數
-    return { thrownIds, failedIds, noLabelIds, noBtnBatches, halted };
+    return { thrownIds, completedIds, failedIds, noLabelIds, noBtnBatches, halted };
   }
 
   /** 拋單階段:點「更多批次功能」→ 點該物流的拋單按鈕 → (宅配)確認 → 關閉結果

@@ -1,5 +1,5 @@
 # B UI 骨架
-<!-- 更新：2026-08-18 -->
+<!-- 更新：2026-11-13 -->
 
 > **適用場景**：要改動 UI 元件、看板、FAB、流程順序、訂單分類規則、物流配置、狀態機、色彩/z-index 時讀本檔。問「這個按鈕在哪」「這個流程怎麼跑」也讀這裡。
 > **不處理**：1shop 平台端的既定行為與踩坑教訓（→ A 平台事實）；驗收條件與 Gherkin（→ C BDD 現行規格）；註解與交付規範（→ D 註解與交付規範）
@@ -110,6 +110,7 @@ body
 | 掃描深潛頁數 | `#v11-pages` | 1-10,從當前頁開始往後掃 N 頁 |
 | 預購歸類目的地下拉 | `#v11-preorder-tab` | 預購訂單預設要移到「暫存」or「其他」分頁 |
 | 啟動大數據掃描 | `#v11-btn-scan` | 主要進入點,觸發 `startScan()` |
+| 已到貨預購出貨 | `#v11-btn-preorder-release-scan` | 掃描「暫存／其他」候選，進入 PREORDER_RELEASE 模式 |
 | 開啟看板 | `#v11-btn-open-kanban` | 把掃描結果的看板 modal 展開 |
 
 #### B. 中控台看板 modal `#v11-modal`(預設隱藏,掃描後展開)
@@ -123,6 +124,14 @@ body
 | 自動分流當天出貨 | `#v11-btn-only-logistics` | 只跑階段 C(物流拋印),跳過 A/B |
 | 異常單預設公版 | `#v11-btn-edit-email` | 開啟公版郵件編輯 popup |
 | 公版郵件 popup | `#v11-email-popup` | 編輯發信公版,分【重複單】`#v11-bsubj`/`#v11-bbody` 與【未付款催繳】`#v11-usubj`/`#v11-ubody` 兩組,存檔後發信路徑會實際讀取 |
+
+#### PREORDER_RELEASE 候選看板（V11.70）
+
+- 來源限「暫存／其他」且商品／SKU 關鍵字命中；候選勾選以 `sourceTab::orderId` 區分同 ID 不同來源。
+- checkbox 只代表本批人工授權／排除；執行時仍會重新掃描並安全重檢，付款、duplicate、備註與留言規則不被繞過。
+- 表頭可全選／取消，物流／金額／日期可唯讀排序；排序不改變 checkbox state。
+- 看板沿用 NORMAL 的資訊、商品、付款與物流視覺；顧客留言為只讀人工提醒，不讀全文、不阻擋出貨。正常候選不顯示綠色 gate，只有異常候選顯示 blocking reason。
+- PREORDER_RELEASE 時顯示「執行已勾選的已到貨預購」並隱藏 NORMAL 的全局執行按鈕；回 NORMAL 後反向恢復。兩條 execution flow 不合併。
 
 #### C. 訂單列(每筆訂單在卡片內的一列)
 

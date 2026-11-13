@@ -1579,6 +1579,54 @@ Scenario: 顯示改變不影響資料層
 
 ---
 
+## F15. 已到貨預購出貨（PREORDER_RELEASE）
+
+```gherkin
+Feature: 已到貨預購出貨獨立流程
+  作為出貨人員
+  我希望直接從「暫存／其他」安全處理已到貨預購
+  使未勾選、付款異常或重複異常訂單不會被帶入物流
+
+Scenario: 候選來源、人工授權與安全重檢
+  Given 使用者從「已到貨預購出貨」入口掃描「暫存／其他」
+  And 候選由商品／SKU 關鍵字篩選
+  And checkbox identity 為 sourceTab::orderId
+  When 使用者勾選候選後執行
+  Then 系統應重新掃描兩來源並重新執行付款、duplicate、備註與留言檢查
+  And 勾選只代表本批解除預購等待，不代表直接允許出貨
+  And 未通過 releaseBlockingReason 的訂單不得進物流
+
+Scenario: 來源分頁、strict batch 與物流隔離
+  Given 本批候選通過安全檢查
+  When 系統執行已到貨預購出貨
+  Then 應直接在各自來源分頁做超商當天出貨／宅配當天出貨，不搬回「等待確認」
+  And 所有來源分流完整完成後才進 strict batch 拋單／印單
+  And 7-11、全家與 HCT 只可處理本批 release 授權訂單
+
+Scenario: 預購候選看板只改 view state
+  Given PREORDER_RELEASE 候選看板已產生
+  When 使用者以物流、金額或日期排序，或操作表頭全選／取消
+  Then 只重排候選 view，不得重跑分類、付款或 duplicate 判定
+  And selectedKeys 必須保留每筆 sourceTab::orderId 的人工勾選狀態
+  And 正常候選不顯示綠色 gate，只有異常候選顯示 blocking reason
+
+Scenario: NORMAL 與 PREORDER_RELEASE 的正式執行入口互斥
+  Given 目前模式為 NORMAL
+  Then 顯示「一鍵全局批次執行」並隱藏預購執行按鈕
+  When 切換至 PREORDER_RELEASE
+  Then 顯示「執行已勾選的已到貨預購」並隱藏 NORMAL 全局執行按鈕
+  And 兩個按鈕原有的 execution flow 不得合併
+
+Scenario: 顧客留言只作人工提醒
+  Given NORMAL 或 PREORDER_RELEASE 訂單有顧客留言圖示
+  When 看板渲染
+  Then 兩種模式應共用 parser 與 formatter 顯示提醒
+  And 不讀取留言全文
+  And 提醒不得改變 classification、付款、duplicate 或 blocking 結果
+```
+
+---
+
 ## 附錄 A:Done 定義(Definition of Done)
 
 每個 Feature 完成需符合以下標準:

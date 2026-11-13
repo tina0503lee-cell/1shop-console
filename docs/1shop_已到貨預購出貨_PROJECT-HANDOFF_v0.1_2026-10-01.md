@@ -5,7 +5,7 @@ version: "v0.1"
 created_at: "2026-10-01"
 context_cutoff: "2026-10-01 13:03 Asia/Taipei"
 handoff_type: "project-transfer"
-status: "active"
+status: "completed"
 ---
 
 # 1shop 已到貨預購出貨－Codex 開發交接文件
@@ -37,12 +37,14 @@ status: "active"
 
 **「其他及暫存」中的已到貨預購訂單，可以在商品到貨後重新進入一般出貨流程。**
 
-目前已完成：
+目前已完成（2026-11-13 結案更新）：
 
-- V11.65 已驗證並 commit。
-- 已建立獨立 Git feature branch。
-- 新功能需求與邏輯已拍板。
-- 尚未開始修改程式。
+- V11.70 已完成 PREORDER_RELEASE 獨立入口、候選看板與 strict batch 執行邊界。
+- 可直接從「暫存／其他」掃描候選，以關鍵字＋`sourceTab::orderId` 人工勾選授權。
+- 執行時一律重新掃描並重跑付款、duplicate、顧客／商家備註與顧客留言提醒；勾選不是直接放行。
+- 通過安全檢查後直接在來源分頁做當天出貨，完整來源分流後才進 strict batch 拋單／印單；不搬回「等待確認」。
+- 使用者實機驗證：其他＋7-11 ×1 PASS；暫存＋7-11 ×1＋全家 ×1＋宅配 ×1 的三物流混合 E2E PASS。
+- 使用者決定不再把大批、多頁或 >12 release 列為本次結案條件；未測路徑不宣稱 PASS。
 
 目前 Git 狀態基準：
 
@@ -71,13 +73,9 @@ status: "active"
 9. 所有本批訂單完成分類與移動後，才可開始拋單＋印單。
 10. 拋單、印單、多頁、物流確認、既有物流操作流程原則上全部沿用，不重新設計。
 
-### 下一步
+### 結案狀態
 
-Codex 第一階段只能：
-
-**讀取 repo → 盤點現行架構 → 提出修改計畫。**
-
-尚未授權直接修改程式。
+本功能已完成本次範圍內的實作、回歸與使用者指定實機驗證。此文件保留原始交接背景；與本段矛盾的「尚未開始」舊文字，應以本段與第 17 節的結案更新為準。
 
 ---
 
@@ -556,20 +554,18 @@ preorderReleased = true
 - 【已完成】建立：`feat/preorder-release-flow`
 - 【已完成】本功能需求對齊。
 - 【已完成】Handoff 草稿。
+- 【已完成】V11.66–V11.70 PREORDER_RELEASE：雙來源候選掃描、`sourceTab::orderId` 人工授權、執行前重新掃描與安全重檢、來源分頁分流、strict batch 拋單／印單。
+- 【已完成】顧客留言只讀提醒：NORMAL 與 PREORDER_RELEASE 共用 parser／formatter，不讀全文、不參與分類或自動阻擋。
+- 【已完成】PREORDER_RELEASE 看板：NORMAL 視覺對齊、異常 blocking reason、排序、全選／取消與模式化正式執行按鈕。
+- 【已完成】使用者實機：其他＋7-11 ×1 PASS；暫存＋7-11 ×1＋全家 ×1＋宅配 ×1 三物流混合 E2E PASS。
 
 ### 17.2 進行中
 
-- 【進行中】Handoff 使用者確認。
+- 無。本功能依使用者決定結案。
 
 ### 17.3 尚未開始
 
-- Codex repo 架構盤點。
-- 修改計畫。
-- 程式實作。
-- 新增／修改測試。
-- regression test。
-- diff review。
-- merge 決策。
+- 本次範圍無待辦。merge、push、deploy 與任何額外大批／多頁／>12 release 驗收，均不屬本次結案。
 
 ---
 

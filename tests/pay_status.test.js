@@ -164,8 +164,8 @@ eq(payGroup({ id: 'x' }), 'unknown', '完全沒有付款狀態 → unknown(擋�
 //   所以這一組測「付款分組 → 那筆預購單會不會留在預購分支」,
 //   再加一條結構斷言,防止那個條件哪天被改回去而沒人發現。
 console.log('=== G. 預購單的分類閘門(V11.64)===');
-eq(src.includes('o.hasPreorder && isPayable(o)'), true,
-   'classifyOrders 的預購分支必須要求付款已成立(條件被改回 o.hasPreorder 就會在這裡失敗)');
+eq(src.includes('o.hasPreorder && !o.preorderReleased && isPayable(o)'), true,
+   'classifyOrders 的預購分支必須要求付款已成立,且只允許本批 release 跳過');
 // true  = 留在預購分支:不寫備註、移暫存/其他、不出貨、不發信
 // false = 往下掉:移「確認中」交人工(pending/dead 還會寄催繳信)
 const PRE_GATE = {
